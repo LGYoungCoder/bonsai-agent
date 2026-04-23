@@ -1,0 +1,155 @@
+[
+  {
+    "name": "file_read",
+    "description": "读文件。返回带行号内容。优先用此工具而非 code_run cat(自动截断大文件,省 token)。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "path": {"type": "string", "description": "绝对或相对路径"},
+        "start": {"type": "integer", "description": "起始行号(1-based)", "default": 1},
+        "count": {"type": "integer", "description": "读取行数", "default": 200},
+        "keyword": {"type": "string", "description": "[可选] 提供则返回首个匹配(不区分大小写)的周边内容"}
+      },
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "file_write",
+    "description": "写文件。patch 模式要求 old_content 唯一匹配;overwrite 全量覆盖(自动备份旧版);append 追加。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "path": {"type": "string", "description": "文件路径"},
+        "mode": {"type": "string", "enum": ["patch", "overwrite", "append", "prepend"], "default": "patch"},
+        "old_content": {"type": "string", "description": "patch 模式必填,必须在文件中唯一出现"},
+        "new_content": {"type": "string", "description": "patch/overwrite/append 的内容。支持 {{file:path:start:end}} 引用"}
+      },
+      "required": ["path", "mode", "new_content"]
+    }
+  },
+  {
+    "name": "code_run",
+    "description": "执行 python 或 shell。万能扩展工具——需要新能力(发邮件/调 API/解析 PDF)时写代码,不加新工具。大输出自动截断 + 存盘。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "code": {"type": "string", "description": "代码内容。也可以把代码放在回复的 ```python / ```bash 块里,省略此参数自动提取最后一个块"},
+        "type": {"type": "string", "enum": ["python", "bash"], "default": "python"},
+        "timeout": {"type": "integer", "description": "秒", "default": 60},
+        "cwd": {"type": "string", "description": "工作目录(相对 session cwd)", "default": "."},
+        "interest_hint": {"type": "string", "description": "[可选] 你最关心输出里的什么内容,截断时会优先保留相关行"}
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "memory_search",
+    "description": "搜索历史对话(MemoryStore)。返回 verbatim drawer 列表。尽量带 wing/room 过滤提高召回准确度。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "query": {"type": "string", "description": "自然语言查询"},
+        "wing": {"type": "string", "description": "[可选] 项目/人名过滤"},
+        "room": {"type": "string", "description": "[可选] 日期/话题过滤"},
+        "n": {"type": "integer", "description": "返回条数", "default": 5}
+      },
+      "required": ["query"]
+    }
+  },
+  {
+    "name": "skill_lookup",
+    "description": "查 SkillStore L1 关键词索引,返回候选 SOP 文件路径。命中后用 file_read 取详情。新任务第一步常用。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "keyword": {"type": "string", "description": "动作词或场景关键词(如'登录微信'、'解析 PDF'、'配置 ADB')"}
+      },
+      "required": ["keyword"]
+    }
+  },
+  {
+    "name": "web_scan",
+    "description": "获取当前页面简化内容 + 标签页列表(AX tree 优先,不行降级简化 DOM)。切换标签页也走这个工具。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "scope": {"type": "string", "description": "[可选] 元素 ID,展开特定 section。不填返回页面大纲"},
+        "switch_tab_id": {"type": "string", "description": "[可选] 切到指定 tab"},
+        "full": {"type": "boolean", "description": "强制返回完整内容(默认 progressive disclosure)", "default": false},
+        "tabs_only": {"type": "boolean", "description": "仅返回标签列表,不抓页面", "default": false}
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "web_execute_js",
+    "description": "执行 JS 控制浏览器。优先用 element ID (a1, a2...) 而非 CSS selector。大结果可以 save_to_file。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "script": {"type": "string", "description": "JS 代码。也可放在回复的 ```javascript 块里"},
+        "switch_tab_id": {"type": "string", "description": "[可选] 切到指定 tab"},
+        "save_to_file": {"type": "string", "description": "[可选] 大结果存到此路径,返回简要 summary"}
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "ask_user",
+    "description": "需要用户决策时使用:不可逆操作确认、关键分支选择、信息不足。不要频繁问(用户烦);真需要决策才问。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "question": {"type": "string", "description": "问题"},
+        "candidates": {"type": "array", "items": {"type": "string"}, "description": "[可选] 候选项,让用户选号"}
+      },
+      "required": ["question"]
+    }
+  },
+  {
+    "name": "web_click",
+    "description": "点击用 web_scan 得到的短 ID (a1/a2...) 指代的元素。比 web_execute_js 更可靠。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "string", "description": "短 ID,形如 a3"}
+      },
+      "required": ["id"]
+    }
+  },
+  {
+    "name": "web_type",
+    "description": "向 web_scan 返回的短 ID 指代的输入框输入文本。submit=true 时按回车提交。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "text": {"type": "string"},
+        "submit": {"type": "boolean", "default": false}
+      },
+      "required": ["id", "text"]
+    }
+  },
+  {
+    "name": "web_scroll",
+    "description": "滚动当前页面。direction: up / down。amount 单位像素。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "direction": {"type": "string", "enum": ["up", "down"], "default": "down"},
+        "amount": {"type": "integer", "default": 400}
+      }
+    }
+  },
+  {
+    "name": "web_navigate",
+    "description": "打开一个 URL(当前 tab 导航)。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "url": {"type": "string"}
+      },
+      "required": ["url"]
+    }
+  }
+]

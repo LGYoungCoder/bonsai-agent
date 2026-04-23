@@ -1,0 +1,70 @@
+# Bonsai config (example). Copy to ~/.bonsai/config.toml or ./config.toml.
+# Secrets use $ref:env:NAME to pull from env, or $ref:secrets:NAME for the keyring (see docs/SAFETY.md).
+
+[agent]
+max_turns = 40
+budget_hard = 60000
+budget_soft = 40000
+working_dir = "."
+
+[frontend]
+default = "cli"
+
+[[providers]]
+name = "glm-primary"
+kind = "glm"
+model = "glm-4.6"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+api_key = "$ref:env:GLM_API_KEY"
+
+[[providers]]
+name = "qwen-backup"
+kind = "qwen"
+model = "qwen3-max"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key = "$ref:env:DASHSCOPE_API_KEY"
+
+[[providers]]
+name = "claude-deluxe"
+kind = "claude"
+model = "claude-sonnet-4-6"
+base_url = "https://api.anthropic.com"
+api_key = "$ref:env:ANTHROPIC_API_KEY"
+
+[failover]
+# Try primary first, fall back in order on network / 5xx / rate-limit.
+chain = ["glm-primary", "qwen-backup", "claude-deluxe"]
+
+[memory]
+skill_dir = "./skills"
+memory_db = "./memory.db"
+
+# Embedding provider —— 三种选择:
+#
+# 1. hash  (默认,零依赖,质量差)
+# embed_provider = "hash"
+#
+# 2. openai-compatible 远端(推荐 SiliconFlow bge-m3,有免费额度)
+#    注册 https://cloud.siliconflow.cn 取 key
+embed_provider = "openai"
+embed_model = "BAAI/bge-m3"
+embed_base_url = "https://api.siliconflow.cn/v1"
+embed_api_key = "$ref:env:SILICONFLOW_API_KEY"
+#
+# 或者用 Zhipu 自带的 embedding:
+# embed_model = "embedding-3"
+# embed_base_url = "https://open.bigmodel.cn/api/paas/v4"
+# embed_api_key = "$ref:env:GLM_API_KEY"
+#
+# 或者用 OpenAI:
+# embed_model = "text-embedding-3-small"
+# embed_base_url = "https://api.openai.com/v1"
+# embed_api_key = "$ref:env:OPENAI_API_KEY"
+#
+# 3. 本地 sentence-transformers(慢,要装 GPU 栈)
+# embed_provider = "local"
+# embed_model = "BAAI/bge-m3"
+
+[logging]
+level = "INFO"
+cache_stats = "./logs/cache_stats.jsonl"

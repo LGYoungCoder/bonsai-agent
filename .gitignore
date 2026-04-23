@@ -1,0 +1,50 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+config.toml
+config.local.toml
+logs/
+*.db
+*.db-journal
+memory/
+.bonsai_backups/
+
+# Bonsai runtime data (user-specific, never commit)
+~/.bonsai/
+.bonsai/
+data/
+sche_tasks/
+skills/L0.md
+skills/L1_index.txt
+skills/L2_facts.txt
+skills/L3/*
+skills/_meta/
+!skills/L3/.gitkeep
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+temp/
+*.log
+.DS_Store
+
+# Design/dev notes kept local, not shipped in git.
+# USAGE.md is the one user-facing operations doc that IS shipped.
+docs/BACKENDS.md
+docs/CONFIG.md
+docs/FRONTENDS.md
+docs/MEMORY.md
+docs/SAFETY.md
+docs/TOKEN_BUDGET.md
+docs/TOOLS.md

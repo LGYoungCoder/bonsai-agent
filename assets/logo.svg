@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none" role="img" aria-label="Bonsai logo">
+  <title>Bonsai</title>
+
+  <!-- Pot body (Clay) -->
+  <path d="M65 145 L135 145 L127 175 L73 175 Z" fill="#B8754A"/>
+
+  <!-- Pot subtle highlight (left side) -->
+  <path d="M65 145 L73 145 L77 175 L73 175 Z" fill="#D4A574" opacity="0.35"/>
+
+  <!-- Pot rim (Bark) -->
+  <rect x="62" y="139" width="76" height="7" rx="1.5" fill="#3D2817"/>
+
+  <!-- Soil (thin dark band on pot rim top) -->
+  <rect x="65" y="146" width="70" height="1.5" fill="#2C1A10" opacity="0.5"/>
+
+  <!-- Trunk: semi-cascade S-curve (Bark) -->
+  <path d="M100 145 C 97 127, 113 118, 108 102 C 104 90, 86 86, 90 71 C 93 60, 107 55, 112 46"
+        stroke="#3D2817" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Subtle branch accent -->
+  <path d="M96 92 L 82 95" stroke="#3D2817" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+
+  <!-- Canopy: main foliage (Matcha) -->
+  <ellipse cx="95" cy="66" rx="30" ry="22" fill="#7A9268"/>
+
+  <!-- Canopy: upper-right highlight (Leaf) -->
+  <ellipse cx="116" cy="48" rx="18" ry="14" fill="#A0B88C"/>
+
+  <!-- Canopy: lower-left shadow (Moss) -->
+  <ellipse cx="76" cy="78" rx="16" ry="13" fill="#5A7248"/>
+
+  <!-- Canopy: overlap bridge -->
+  <ellipse cx="105" cy="60" rx="12" ry="9" fill="#A0B88C" opacity="0.6"/>
+
+  <!-- Growth seed point (Amber) — the "future" -->
+  <circle cx="124" cy="33" r="3.8" fill="#D4A574"/>
+  <circle cx="124" cy="33" r="1.4" fill="#F5F0E8" opacity="0.5"/>
+</svg>
