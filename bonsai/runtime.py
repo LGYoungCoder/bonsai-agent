@@ -73,10 +73,12 @@ def build_agent(root: Path, cfg: Config, *,
     prefix_text = render_wakeup_prefix(base_sys, skill_store, memory_store)
 
     schema_path = root / "tools" / "schema.json"
-    # Always expose web_* tools — Handler lazy-spawns a managed headless
-    # chromium on first call so web UI / IM bots get browser capability
-    # without an explicit flag. Users who want a visible browser or to
-    # attach to their own Chrome can still use `--browser managed|attach`.
+    # Always expose web_* tools — Handler lazy-spawns a managed chromium
+    # on first call so web UI / IM bots get browser capability without an
+    # explicit flag. build_agent is the non-interactive path (IM bots,
+    # scheduler), so we pin headless=True here. Interactive paths (CLI /
+    # web session) construct Handler directly and let the display auto-
+    # detect kick in.
     tool_specs = (
         load_tool_specs(schema_path, names=ALL_TOOLS, include_memory_recall=True)
         if schema_path.exists() else []
@@ -93,7 +95,7 @@ def build_agent(root: Path, cfg: Config, *,
     handler = Handler(session=session, schema_path=schema_path,
                       prompt_fn=prompt_fn or _default_prompt,
                       memory_store=memory_store, skill_store=skill_store,
-                      evidence=evidence)
+                      evidence=evidence, browser_headless=True)
     policy = BudgetPolicy(soft=cfg.agent.budget_soft, hard=cfg.agent.budget_hard)
     sess_log = SessionLog(
         root / "logs" / "sessions" / f"{session.session_id}.jsonl",

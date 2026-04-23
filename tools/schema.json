@@ -69,7 +69,7 @@
   },
   {
     "name": "web_scan",
-    "description": "获取当前页面简化内容 + 标签页列表(AX tree 优先,不行降级简化 DOM)。切换标签页也走这个工具。",
+    "description": "获取当前页面简化内容 + 标签页列表(AX tree 优先,不行降级简化 DOM)。切换标签页也走这个工具。**知道要做什么就直接用 web_execute_js,不用每步先 scan** —— scan 是方向性观察,不是必经之路。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -83,7 +83,7 @@
   },
   {
     "name": "web_execute_js",
-    "description": "执行 JS 控制浏览器。优先用 element ID (a1, a2...) 而非 CSS selector。大结果可以 save_to_file。",
+    "description": "**浏览器主力工具 —— 完全控制**。任何事都能做:`window.open(url)` 开新 tab、`document.querySelector(...).click()` 点击、`el.value=x;el.dispatchEvent(new Event('input'))` 填表、读 localStorage / cookies、任意 DOM 操作、抓数据。执行后自动侦测新 tab,结果尾部会带 `[new tab(s) opened: <id> <url>]`,用 `switch_tab_id` 切过去。也可引用 `web_scan` 的短 ID (a1,a2...) via `bonsai_el('a3').click()`。大结果用 save_to_file。",
     "input_schema": {
       "type": "object",
       "properties": {

@@ -157,10 +157,10 @@ class BrowserSession:
         if switch_tab_id:
             await self.switch_tab(str(switch_tab_id))
         await self.ensure_connected()
-        # Rewrite a1/a2 references if any: `selectById('a3')` →
-        # `document.querySelector('[data-backend-node-id="XX"]')`-style.
-        # Simplest path: inject a helper once and let model reference via our
-        # global bonsai_el(id) function.
+        # Snapshot page targets pre-exec so we can surface new tabs opened by
+        # window.open(...) — without this the model has no way to discover
+        # the new tab id and resorts to scraping or installing playwright.
+        pre_ids = {t.id for t in await self.client.list_targets() if t.type == "page"}
         helper = self._build_helper_script()
         full = f"{helper}\n{script}"
         result = await self.client.send("Runtime.evaluate", {
@@ -168,17 +168,25 @@ class BrowserSession:
             "returnByValue": True,
             "awaitPromise": True,
         })
+        new_tabs = [t for t in await self.client.list_targets()
+                    if t.type == "page" and t.id not in pre_ids]
+        tab_note = ""
+        if new_tabs:
+            bits = [f"{t.id[:8]} {t.url[:60]!r}" for t in new_tabs]
+            tab_note = ("\n[new tab(s) opened: " + ", ".join(bits) +
+                        " — switch via web_scan switch_tab_id=<id or url fragment>]")
         val = result.get("result") or {}
         if val.get("type") == "undefined":
-            return "[ok] (undefined)"
+            return "[ok] (undefined)" + tab_note
         raw = str(val.get("value", val.get("description", "")))
         if save_to_file:
             from pathlib import Path
             p = Path(save_to_file)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(raw, encoding="utf-8")
-            return f"[ok] result saved to {p} ({len(raw)} bytes; preview: {raw[:200]})"
-        return raw[:8000] + ("\n...[truncated]" if len(raw) > 8000 else "")
+            return f"[ok] result saved to {p} ({len(raw)} bytes; preview: {raw[:200]})" + tab_note
+        body = raw[:8000] + ("\n...[truncated]" if len(raw) > 8000 else "")
+        return body + tab_note
 
     def _build_helper_script(self) -> str:
         mapping = {sid: e["backend_node_id"] for sid, e in self.pool.entries.items()

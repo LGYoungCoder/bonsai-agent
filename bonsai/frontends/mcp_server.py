@@ -49,7 +49,8 @@ async def run_stdio(cfg: Any, root: Path) -> None:
     # daemon so a long-lived MCP session gets the same 15d gc as other entries.
     evidence = EvidenceRecorder(skill_store.root, session_id=session.session_id)
     handler = Handler(session=session, memory_store=memory_store,
-                      skill_store=skill_store, evidence=evidence)
+                      skill_store=skill_store, evidence=evidence,
+                      browser_headless=True)
     start_maintenance(root, cfg)
 
     schema_path = root / "tools" / "schema.json"

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -79,6 +81,13 @@ def _conflicts(calls: list[ToolCall], cwd: Path) -> list[set[int]]:
     return groups
 
 
+def _display_available() -> bool:
+    """True if we likely have a GUI display for headful chromium."""
+    if sys.platform in ("darwin", "win32"):
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 @dataclass
 class Handler:
     session: Session
@@ -90,8 +99,12 @@ class Handler:
     browser: Any = None           # type: BrowserSession | None (Sprint 4)
     evidence: Any = None          # type: EvidenceRecorder | None
     # Zero-config browser: if None when the model first calls a web_* tool,
-    # we transparently spawn a headless managed chromium. Fail-once semantics
+    # we transparently spawn a managed chromium. Fail-once semantics
     # so a missing chromium binary doesn't re-retry on every turn.
+    # Default: headful if a display is available (interactive dev box),
+    # headless on bare servers. IM bot / scheduler override with True so
+    # autonomous runs don't pop windows.
+    browser_headless: bool | None = None
     _browser_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False,
                                          repr=False, compare=False)
     _browser_init_failed: str | None = field(default=None, init=False,
@@ -220,9 +233,11 @@ class Handler:
                 return
             try:
                 from ..tools.browser import BrowserSession
-                self.browser = await BrowserSession.managed(headless=True)
-                log.info("lazy browser: managed chromium at %s",
-                         getattr(self.browser, "debug_url", "?"))
+                headless = (self.browser_headless if self.browser_headless is not None
+                            else not _display_available())
+                self.browser = await BrowserSession.managed(headless=headless)
+                log.info("lazy browser: managed chromium at %s (headless=%s)",
+                         getattr(self.browser, "debug_url", "?"), headless)
             except Exception as e:
                 self._browser_init_failed = f"{type(e).__name__}: {e}"
                 log.warning("lazy browser init failed: %s", self._browser_init_failed)
