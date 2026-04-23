@@ -277,10 +277,14 @@ async def _dispatch_browser(browser: Any, name: str, args: dict) -> str:
             scope=args.get("scope"),
             tabs_only=bool(args.get("tabs_only")),
             full=bool(args.get("full")),
+            switch_tab_id=args.get("switch_tab_id"),
         )
     if name == "web_execute_js":
         script = args.get("script") or args.get("code") or ""
-        return await browser.execute_js(script, save_to_file=args.get("save_to_file"))
+        return await browser.execute_js(
+            script, save_to_file=args.get("save_to_file"),
+            switch_tab_id=args.get("switch_tab_id"),
+        )
     if name == "web_click":
         return await browser.click(args["id"])
     if name == "web_type":
@@ -290,5 +294,6 @@ async def _dispatch_browser(browser: Any, name: str, args: dict) -> str:
         return await browser.scroll(direction=args.get("direction", "down"),
                                      amount=int(args.get("amount", 400)))
     if name == "web_navigate":
-        return await browser.navigate(args["url"])
+        return await browser.navigate(args["url"],
+                                       new_tab=bool(args.get("new_tab")))
     return f"[error] unknown browser op: {name}"

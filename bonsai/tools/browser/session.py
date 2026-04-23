@@ -103,7 +103,9 @@ class BrowserSession:
         return f"[switched to] {match.title} ({match.url})"
 
     async def scan(self, *, scope: str | None = None, tabs_only: bool = False,
-                   full: bool = False) -> str:
+                   full: bool = False, switch_tab_id: str | None = None) -> str:
+        if switch_tab_id:
+            await self.switch_tab(str(switch_tab_id))
         if tabs_only:
             return await self.list_tabs()
         await self.ensure_connected()
@@ -150,7 +152,10 @@ class BrowserSession:
             log.debug("dom prune fallback failed: %s", e)
             return ""
 
-    async def execute_js(self, script: str, *, save_to_file: str | None = None) -> str:
+    async def execute_js(self, script: str, *, save_to_file: str | None = None,
+                         switch_tab_id: str | None = None) -> str:
+        if switch_tab_id:
+            await self.switch_tab(str(switch_tab_id))
         await self.ensure_connected()
         # Rewrite a1/a2 references if any: `selectById('a3')` →
         # `document.querySelector('[data-backend-node-id="XX"]')`-style.
@@ -235,7 +240,12 @@ class BrowserSession:
         })
         return f"[ok] scrolled {direction} by {amount}px"
 
-    async def navigate(self, url: str) -> str:
+    async def navigate(self, url: str, *, new_tab: bool = False) -> str:
+        if new_tab:
+            target = await self.client.new_target(url)
+            await self.client.attach(target)
+            self._connected = True
+            return f"[ok] opened new tab {target.id[:8]} → {url}"
         await self.ensure_connected()
         await self.client.send("Page.navigate", {"url": url})
         return f"[ok] navigating to {url}"

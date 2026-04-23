@@ -143,11 +143,12 @@
   },
   {
     "name": "web_navigate",
-    "description": "打开一个 URL(当前 tab 导航)。",
+    "description": "打开一个 URL。默认当前 tab 跳转;要开新 tab 设 new_tab=true(注册场景建议新 tab,保留原 tab 上下文)。",
     "input_schema": {
       "type": "object",
       "properties": {
-        "url": {"type": "string"}
+        "url": {"type": "string"},
+        "new_tab": {"type": "boolean", "description": "[可选] 新开 tab 打开;切回原 tab 用 web_scan switch_tab_id=<序号或 url 片段>", "default": false}
       },
       "required": ["url"]
     }
