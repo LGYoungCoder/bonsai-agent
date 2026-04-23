@@ -103,7 +103,8 @@ bonsai mcp            # MCP server (stdio) for Claude Code / Cursor
 ```toml
 [agent]
 max_turns = 40
-budget_hard = 60000
+budget_hard = 60000                             # compression target ceiling; never raises
+                                                # (bump for 1M/200K models)
 
 [[providers]]
 name = "glm-primary"

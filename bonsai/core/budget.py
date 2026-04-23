@@ -8,7 +8,6 @@ dynamic tail may shrink.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,20 +44,18 @@ def estimate(x: Any) -> int:
 
 @dataclass
 class BudgetPolicy:
+    """Compression targets, not crash lines.
+
+    - soft: 超过就考虑压缩 (loop 内带 cooldown, 不是每轮都压)
+    - hard: 压缩目标的参考上限 (超过会更激进地裁 tool_result / pop 最老 turn)
+
+    这里都是"尽力而为"的建议值; 真正的硬边界由 provider 的 context_win
+    (自然报错) 和 max_turns (防失控) 两道栅栏负责。长 context 模型 (1M / 200K)
+    应该把 soft/hard 往上调而不是被这个数字卡住。
+    """
     soft: int = 40_000
     hard: int = 60_000
     prefix_max: int = 3_000  # sys + tools + L1 index
-
-
-class BudgetExceeded(RuntimeError):
-    pass
-
-
-def check(messages: Iterable[dict], tools: Any, *, policy: BudgetPolicy) -> int:
-    total = estimate(list(messages)) + estimate(tools)
-    if total > policy.hard:
-        raise BudgetExceeded(f"total={total} exceeds hard={policy.hard}")
-    return total
 
 
 _TRUNC_MARKER = "\n... [truncated {n} chars] ..."

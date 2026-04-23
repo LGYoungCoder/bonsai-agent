@@ -271,13 +271,13 @@ def chat(
                 _handle_continue(root, n, loop_maker=lambda pre: AgentLoop(
                     chain, pre, handler,
                     policy=policy, max_turns=cfg.agent.max_turns,
-                    session_log=sess_log,
+                    session_log=sess_log, soft_landing=False,
                 ))
                 continue
 
             loop = AgentLoop(chain, _fresh_prefix(), handler,
                              policy=policy, max_turns=cfg.agent.max_turns,
-                             session_log=sess_log)
+                             session_log=sess_log, soft_landing=False)
             loop.add_user(user_text)
             try:
                 async for ev in loop.run():
@@ -806,11 +806,12 @@ class _WebSessionCtx:
 
     def new_loop(self, pre_messages=None) -> AgentLoop:
         # Rebuild prefix each call so /new + reconnect pick up new SOPs etc.
+        # Web UI is interactive — user can /continue, so no soft landing.
         self._prefix = self._build_prefix()
         loop = AgentLoop(
             self._chain, self._prefix, self._handler,
             policy=self._policy, max_turns=self._cfg.agent.max_turns,
-            session_log=self._sess_log,
+            session_log=self._sess_log, soft_landing=False,
         )
         if pre_messages:
             loop.tail.messages = list(pre_messages)

@@ -100,21 +100,23 @@ class Handler:
 - 工具内部可以**抛异常不兜底**（loop 层统一转成 error prompt）
 - 工具的**数据流 / 控制流分离**（data 给模型，next_prompt 指导下一轮）
 
-### 原则 4：预算硬检查
+### 原则 4：预算只压不崩
 
-每轮进入 LLM 前，做一次计算：
+每轮进入 LLM 前估算总 token,超 soft 才压,且带 cooldown 避免模型看到反复被裁的 `<thinking>`:
 
 ```python
-def enforce_budget(messages, tools):
+def on_turn_start(messages, tools):
     total = estimate_tokens(messages) + estimate_tokens(tools)
-    if total > BUDGET_HARD_LIMIT:        # 例如 60K
-        raise BudgetExceeded(...)        # 直接崩，不救
-    if total > BUDGET_SOFT_LIMIT:        # 例如 40K
-        compress_history_tags(messages, aggressive=True)
-    log_budget(total)                    # 落盘供分析
+    cd = (cd + 1) % COMPRESS_COOLDOWN          # 默认 5 轮
+    # 刚过 soft 一点点 → 让 tail 稳定几轮; 大幅超才立刻压。
+    if total > soft and (cd == 0 or total > soft * 1.25):
+        messages = compress_tail(messages, target=soft * 0.6)
+    log_budget(total)
 ```
 
-**不做"智能"的上下文管理**（不引入小模型摘要旧历史等）。纯粹靠规则 + 压缩 + 硬裁。理由：每加一层智能都会引入新的 token 消耗和新的幻觉风险。
+`soft` / `hard` 是**压缩目标**不是崩溃线 —— bonsai 从不 raise。真正的边界由 `max_turns` (防失控) 和 provider 的 `context_win` (超长自然报错) 两道栅栏负责。对长 context 强模型 (Claude 1M / Gemini 2M) 把 soft/hard 往上调即可。
+
+**不做"智能"的上下文管理**(不引入小模型摘要旧历史等)。纯粹靠规则 + 压缩 + 硬裁。理由:每加一层智能都会引入新的 token 消耗和新的幻觉风险。
 
 ## 模块清单 & 代码规模预算
 
@@ -237,5 +239,6 @@ def build_request(messages, tools, sys_prompt):
 5. SkillStore 写入永远需要 execution evidence
 6. MemoryStore 永远 verbatim（禁止摘要写入）
 7. 系统提示里的固定前缀永远**字节级稳定**（保 cache）
+8. 预算超限**只压不崩** —— 从不 raise,由 max_turns + provider context_win 两道栅栏兜底
 
 违反任何一条的 PR 都不合并。

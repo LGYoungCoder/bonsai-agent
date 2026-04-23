@@ -39,6 +39,7 @@ class AgentLoop:
         policy: BudgetPolicy | None = None,
         max_turns: int = 40,
         session_log: SessionLog | None = None,
+        soft_landing: bool = True,
     ) -> None:
         self.backend = backend
         self.prefix = prefix
@@ -47,6 +48,13 @@ class AgentLoop:
         self.max_turns = max_turns
         self.tail = DynamicTail(messages=[])
         self.session_log = session_log
+        # soft_landing=True: 触达 max_turns 后注入 checkpoint 强制文字收场,
+        # 适用于无人值守 channel (IM bot / autonomous / reflect)。
+        # soft_landing=False: 触达 max_turns 直接 done, 用户可 /continue 继续。
+        self.soft_landing = soft_landing
+        # 压缩 cooldown: 每轮递增, 到阈值或 total 大幅超 soft 才真压,
+        # 避免模型看到反复被裁的 <thinking> 失去推理连续性。
+        self._compress_cd = 0
 
     def add_user(self, text: str) -> None:
         self.tail.messages.append(Message(role="user", content=text))
@@ -65,7 +73,13 @@ class AgentLoop:
         for turn in range(self.max_turns):
             self.handler.session.next_turn()
             total = _estimate_total(self.tail.messages, self.prefix)
-            if total > self.policy.soft:
+            self._compress_cd = (self._compress_cd + 1) % _COMPRESS_COOLDOWN
+            # 压缩触发: total 大幅超 soft (1.25x) 立刻压, 否则等到 cooldown 归零。
+            # 刚过 soft 一点点时让 tail 稳定几轮, 模型的 <thinking> 不被反复裁。
+            should_compress = total > self.policy.soft and (
+                self._compress_cd == 0 or total > int(self.policy.soft * 1.25)
+            )
+            if should_compress:
                 self.tail.messages, new_total = _compress_tail(
                     self.tail.messages, self.prefix, self.policy, start_total=total,
                 )
@@ -162,6 +176,19 @@ class AgentLoop:
                 yield StreamEvent(kind="done", data={"reason": "should_exit", "turns": turn + 1})
                 return
 
+        # ---- max_turns hit ----
+        # Interactive frontends (CLI / web) want plain `done` so the user can
+        # `/continue` on their own judgment. Headless channels (IM bot,
+        # autonomous, reflect) opt-in to soft_landing so the model at least
+        # leaves a summary + plan before the turn tail dangles on a tool_call.
+        if not self.soft_landing:
+            yield StreamEvent(kind="done", data={
+                "reason": "max_turns",
+                "turns": self.max_turns,
+                "hint": "触达 max_turns。/continue 让模型接着干,或 /new 开新任务。",
+            })
+            return
+
         # ---- Soft landing ----
         # Instead of hard-killing at max_turns (user gets mid-work
         # truncation, no usable handoff), inject a checkpoint prompt and
@@ -237,6 +264,8 @@ def _estimate_total(messages: list[Message], prefix: FrozenPrefix) -> int:
     return estimate([_msg_to_raw(m) for m in messages]) + estimate(prefix.tools)
 
 
+_COMPRESS_COOLDOWN = 5  # turns between forced compressions when total is only
+                        # mildly over soft; breached when total > soft * 1.25.
 _THINKING_COMPRESS_AGGRESSIVE_THRESHOLD = 50_000  # B2: fixed to keep tail bytes
                                                   # deterministic → cache stable.
 _FILE_READ_SUPERSEDED_MARKER = "[superseded by later file_read with same args]"

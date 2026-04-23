@@ -163,8 +163,8 @@ bonsai doctor             # 一键自检，看哪里没配好
 ```toml
 [agent]
 max_turns = 40               # 单次对话最多几轮
-budget_soft = 40000          # 软上限，超了开始压缩
-budget_hard = 60000          # 硬上限
+budget_soft = 40000          # 软上限，超了开始压缩（带 cooldown，不是每轮都压）
+budget_hard = 60000          # 压缩目标参考上限；从不 raise（1M / 200K 模型可调高）
 
 [[providers]]
 name = "claude-primary"
