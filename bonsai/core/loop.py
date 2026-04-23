@@ -162,11 +162,61 @@ class AgentLoop:
                 yield StreamEvent(kind="done", data={"reason": "should_exit", "turns": turn + 1})
                 return
 
+        # ---- Soft landing ----
+        # Instead of hard-killing at max_turns (user gets mid-work
+        # truncation, no usable handoff), inject a checkpoint prompt and
+        # give the model ONE final turn to write a summary + next-step
+        # plan. Any tool_calls it emits here are ignored — the turn is
+        # text-only by contract. User can /new and paste the plan to
+        # continue seamlessly.
+        checkpoint = (
+            f"[system-note: 已经用了 {self.max_turns} 轮工具调用,触达上限。"
+            "请**不要再调用任何工具**,直接用文字回答:\n"
+            "1) 阶段性总结 —— 到目前为止做了什么、发现了什么、阻塞在哪\n"
+            "2) 下一步计划 —— 如果继续,下一轮应该先做什么(一两句话即可)\n"
+            "用户若想继续,会 /new 并把你这份计划贴给你。]"
+        )
+        self.tail.messages.append(Message(role="user", content=checkpoint))
+        if self.session_log:
+            self.session_log.record_user(checkpoint)
+
+        acc_text = ""
+        try:
+            async for ev in self.backend.stream(self.prefix, self.tail):
+                if ev.kind == "text":
+                    chunk = ev.data or ""
+                    acc_text += chunk
+                    if chunk:
+                        yield ev
+                elif ev.kind == "tool_call":
+                    continue  # text-only by contract; discard any stray calls
+                elif ev.kind == "usage":
+                    yield ev
+                elif ev.kind == "done":
+                    break
+                elif ev.kind == "error":
+                    yield ev
+        except Exception as e:
+            log.warning("soft-landing stream failed (%s) — falling back to chat()", e)
+            resp = await self.backend.chat(self.prefix, self.tail)
+            acc_text = resp.content or ""
+            if acc_text:
+                yield StreamEvent(kind="text", data=acc_text)
+
+        final_msg = Message(role="assistant", content=acc_text or None)
+        self.tail.messages.append(final_msg)
+        if self.session_log:
+            prov = getattr(self.backend, "name", "") or ""
+            mdl = getattr(self.backend, "model", "") or ""
+            self.session_log.record_assistant(
+                final_msg, provider=prov, model=mdl, turn=self.max_turns + 1,
+            )
+
         yield StreamEvent(kind="done", data={
-            "reason": "max_turns",
-            "turns": self.max_turns,
-            "hint": "hit max_turns — raise policy, split the task, or continue "
-                    "with a fresh user message.",
+            "reason": "soft_landing",
+            "turns": self.max_turns + 1,
+            "hint": "触达 max_turns,模型输出了阶段性总结+下一步计划。"
+                    "/new 后把计划贴回去即可继续。",
         })
 
 
