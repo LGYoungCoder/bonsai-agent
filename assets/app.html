@@ -2079,12 +2079,24 @@ function sendMessage() {
 // ═══════════════════════════════════════════════════════════════════
 
 const PROVIDER_KINDS = [
-  { value: 'claude', label: 'claude (Anthropic 原生 / GLM)' },
-  { value: 'openai', label: 'openai (OpenAI 兼容 / Qwen / DeepSeek / GLM-OAI)' },
-  { value: 'glm',    label: 'glm (Zhipu 原生)' },
-  { value: 'qwen',   label: 'qwen (DashScope)' },
-  { value: 'minimax',label: 'minimax' },
+  { value: 'claude',   label: 'claude (Anthropic 原生 / GLM-Anthropic)' },
+  { value: 'openai',   label: 'openai (OpenAI / Kimi / 其它 OAI 兼容)' },
+  { value: 'deepseek', label: 'deepseek (V4-flash / chat / reasoner)' },
+  { value: 'glm',      label: 'glm (Zhipu 原生)' },
+  { value: 'qwen',     label: 'qwen (DashScope)' },
+  { value: 'minimax',  label: 'minimax' },
 ];
+
+// 选 kind 时自动填 base_url/model (仅在为空时,不覆盖用户已填内容)。
+// 与 CLI setup_wizard 的 preset 对齐,Web UI 不要求用户记 endpoint。
+const KIND_PRESETS = {
+  claude:   { base_url: 'https://api.anthropic.com',               model: 'claude-sonnet-4-6' },
+  openai:   { base_url: 'https://api.openai.com/v1',               model: 'gpt-4.1' },
+  deepseek: { base_url: 'https://api.deepseek.com/v1',             model: 'deepseek-v4-flash' },
+  glm:      { base_url: 'https://open.bigmodel.cn/api/paas/v4',    model: 'glm-4.6' },
+  qwen:     { base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen3-max' },
+  minimax:  { base_url: 'https://api.minimax.chat/v1',             model: 'abab6.5-chat' },
+};
 
 async function loadConfig() {
   try {
@@ -2363,7 +2375,17 @@ function renderProviderCard(p, idx) {
         el('label', { class: 'field-label' }, '协议类型 (kind)'),
         (() => {
           const sel = el('select', { class: 'field-select',
-            onchange: (e) => { p.kind = e.target.value; } });
+            onchange: (e) => {
+              p.kind = e.target.value;
+              // 只在字段真空时套用 preset,不覆盖用户已填内容。
+              const preset = KIND_PRESETS[p.kind];
+              if (preset) {
+                let touched = false;
+                if (!p.base_url) { p.base_url = preset.base_url; touched = true; }
+                if (!p.model)    { p.model    = preset.model;    touched = true; }
+                if (touched) renderConfigView();
+              }
+            } });
           for (const k of PROVIDER_KINDS) {
             const o = el('option', { value: k.value }, k.label);
             if (p.kind === k.value) o.selected = true;
@@ -2934,9 +2956,14 @@ async function testProvider(idx) {
 
 $('#btn-add-provider').addEventListener('click', () => {
   state.configDraft ||= { providers: [], failover: [], memory: {}, agent: {} };
+  const defaultKind = 'openai';
+  const preset = KIND_PRESETS[defaultKind] || {};
   state.configDraft.providers.push({
     name: `provider-${state.configDraft.providers.length + 1}`,
-    kind: 'openai', model: '', base_url: '', api_key: '',
+    kind: defaultKind,
+    model: preset.model || '',
+    base_url: preset.base_url || '',
+    api_key: '',
   });
   renderConfigView();
 });
