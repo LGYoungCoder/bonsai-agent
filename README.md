@@ -240,6 +240,10 @@ ruff check bonsai
 
 [MIT](LICENSE)
 
+## 友链
+
+- [LINUX DO](https://linux.do) — 新的理想型社区
+
 ---
 
 <div align="center">

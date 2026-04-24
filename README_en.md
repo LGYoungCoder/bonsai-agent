@@ -206,6 +206,10 @@ ruff check bonsai tests
 
 [MIT](LICENSE)
 
+## 🔗 Friends
+
+- [LINUX DO](https://linux.do) — A new ideal-type community
+
 ---
 
 <div align="center">
