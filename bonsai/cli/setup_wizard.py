@@ -78,11 +78,11 @@ PROVIDER_PRESETS: dict[str, ProviderPreset] = {
         env_hint="在 https://dashscope.console.aliyun.com 创建 key",
     ),
     "deepseek": ProviderPreset(
-        label="DeepSeek",
-        kind="openai",
-        default_model="deepseek-chat",
+        label="DeepSeek (V4 / V3 / reasoner)",
+        kind="deepseek",
+        default_model="deepseek-v4-flash",
         default_base_url="https://api.deepseek.com/v1",
-        hint="便宜、支持 cache、编程强",
+        hint="便宜、支持 cache、编程强;V4-flash 最快,reasoner 带思考链",
         env_hint="在 https://platform.deepseek.com 取 key",
     ),
     "minimax": ProviderPreset(

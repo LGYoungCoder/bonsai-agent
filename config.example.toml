@@ -31,6 +31,14 @@ model = "claude-sonnet-4-6"
 base_url = "https://api.anthropic.com"
 api_key = "$ref:env:ANTHROPIC_API_KEY"
 
+# DeepSeek — OpenAI-兼容接口, V4-flash 是最新快速款, 也可用 deepseek-chat / deepseek-reasoner。
+[[providers]]
+name = "deepseek-flash"
+kind = "deepseek"
+model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com/v1"
+api_key = "$ref:env:DEEPSEEK_API_KEY"
+
 [failover]
 # Try primary first, fall back in order on network / 5xx / rate-limit.
 chain = ["glm-primary", "qwen-backup", "claude-deluxe"]
