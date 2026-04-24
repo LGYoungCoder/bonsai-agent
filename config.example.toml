@@ -66,5 +66,12 @@ embed_api_key = "$ref:env:SILICONFLOW_API_KEY"
 # embed_model = "BAAI/bge-m3"
 
 [logging]
+# 控制台日志级别 (DEBUG / INFO / WARNING / ERROR)。老字段 `level` 仍生效,等价于 console_level。
 level = "INFO"
 cache_stats = "./logs/cache_stats.jsonl"
+
+# 双路输出: 控制台按 level 显示,同时全部 DEBUG 写入文件,方便事后排查
+# "模型/连接突然断开" 类问题(文件里会看到 httpx.ReadTimeout / RemoteProtocolError 等真实原因)。
+log_file = "./logs/bonsai.log"      # 5MB 滚动 × 5 份
+# console_level = "INFO"            # 可覆盖 `level`;env BONSAI_CONSOLE_LEVEL 最高优先
+# file_level = "DEBUG"              # env BONSAI_FILE_LEVEL 覆盖

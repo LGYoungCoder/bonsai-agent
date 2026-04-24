@@ -91,8 +91,11 @@ class MemoryConfig:
 
 @dataclass
 class LoggingConfig:
-    level: str = "INFO"
+    level: str = "INFO"  # legacy: kept for back-compat; maps to console_level when set
     cache_stats: str = "./logs/cache_stats.jsonl"
+    log_file: str = "./logs/bonsai.log"
+    console_level: str = ""  # empty = fall back to `level`
+    file_level: str = "DEBUG"  # file always captures detail for postmortem
 
 
 @dataclass

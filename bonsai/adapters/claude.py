@@ -166,15 +166,21 @@ class ClaudeAdapter:
     async def stream(self, prefix: FrozenPrefix, tail: DynamicTail,
                      **opts: Any) -> AsyncIterator[StreamEvent]:
         body = self._build_body(prefix, tail, stream=True, **opts)
+        url = f"{self.base_url.rstrip('/')}/v1/messages"
+        log.debug("claude stream → %s model=%s msgs=%d tools=%d timeout=%.1fs",
+                  url, self.model, len(body["messages"]),
+                  len(body.get("tools") or []), self.timeout)
+        chunk_count = 0
+        text_bytes = 0
+        saw_message_stop = False
         async with httpx.AsyncClient(timeout=self.timeout) as cli, cli.stream(
-            "POST",
-            f"{self.base_url.rstrip('/')}/v1/messages",
-            json=body,
-            headers=self._headers(),
+            "POST", url, json=body, headers=self._headers(),
         ) as r:
+            log.debug("claude stream ← HTTP %d", r.status_code)
             r.raise_for_status()
             partial_calls: dict[int, dict] = {}
             async for line in r.aiter_lines():
+                chunk_count += 1
                 if not line or not line.startswith("data:"):
                     continue
                 payload = line[5:].strip()
@@ -197,7 +203,9 @@ class ClaudeAdapter:
                 elif et == "content_block_delta":
                     delta = evt.get("delta", {})
                     if delta.get("type") == "text_delta":
-                        yield StreamEvent(kind="text", data=delta.get("text", ""))
+                        t = delta.get("text", "")
+                        text_bytes += len(t)
+                        yield StreamEvent(kind="text", data=t)
                     elif delta.get("type") == "input_json_delta":
                         idx = evt.get("index", 0)
                         if idx in partial_calls:
@@ -212,7 +220,18 @@ class ClaudeAdapter:
                             cache_creation_tokens=usage.get("cache_creation_input_tokens", 0),
                         ))
                 elif et == "message_stop":
+                    saw_message_stop = True
                     break
+            if not saw_message_stop:
+                # Stream ended without `message_stop` — server half-closed or
+                # network cut. This is the silent-disconnect fingerprint.
+                log.warning("claude stream ended without message_stop "
+                            "(chunks=%d text_bytes=%d partial_tools=%d) — "
+                            "likely upstream disconnect",
+                            chunk_count, text_bytes, len(partial_calls))
+            else:
+                log.debug("claude stream done chunks=%d text_bytes=%d tools=%d",
+                          chunk_count, text_bytes, len(partial_calls))
             for idx in sorted(partial_calls):
                 e = partial_calls[idx]
                 try:

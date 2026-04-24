@@ -125,7 +125,8 @@ class AgentLoop:
                 # Streaming failed mid-turn — fall back to a blocking
                 # chat() so one provider wobble doesn't wipe the user's
                 # turn. Resulting text still lands in the history.
-                log.warning("stream failed (%s) — falling back to chat()", e)
+                log.warning("stream failed [%s: %s] — falling back to chat()",
+                            type(e).__name__, e)
                 resp = await self.backend.chat(self.prefix, self.tail)
                 acc_text = resp.content or ""
                 tool_calls = list(resp.tool_calls)
@@ -224,7 +225,8 @@ class AgentLoop:
                 elif ev.kind == "error":
                     yield ev
         except Exception as e:
-            log.warning("soft-landing stream failed (%s) — falling back to chat()", e)
+            log.warning("soft-landing stream failed [%s: %s] — falling back to chat()",
+                        type(e).__name__, e)
             resp = await self.backend.chat(self.prefix, self.tail)
             acc_text = resp.content or ""
             if acc_text:

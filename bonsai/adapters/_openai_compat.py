@@ -152,19 +152,26 @@ class OpenAICompatAdapter:
     async def stream(self, prefix: FrozenPrefix, tail: DynamicTail,
                      **opts: Any) -> AsyncIterator[StreamEvent]:
         body = self._build_body(prefix, tail, stream=True, **opts)
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
+        log.debug("%s stream → %s model=%s msgs=%d tools=%d timeout=%.1fs",
+                  self.kind, url, self.model, len(body["messages"]),
+                  len(body.get("tools") or []), self.timeout)
+        chunk_count = 0
+        text_bytes = 0
+        saw_done = False
         async with httpx.AsyncClient(timeout=self.timeout) as cli, cli.stream(
-            "POST",
-            f"{self.base_url.rstrip('/')}/chat/completions",
-            json=body,
-            headers=self._headers(),
+            "POST", url, json=body, headers=self._headers(),
         ) as r:
+            log.debug("%s stream ← HTTP %d", self.kind, r.status_code)
             r.raise_for_status()
             partial_calls: dict[int, dict] = {}
             async for line in r.aiter_lines():
+                chunk_count += 1
                 if not line or not line.startswith("data:"):
                     continue
                 payload = line[5:].strip()
                 if payload == "[DONE]":
+                    saw_done = True
                     break
                 try:
                     chunk = json.loads(payload)
@@ -173,6 +180,7 @@ class OpenAICompatAdapter:
                 choice = (chunk.get("choices") or [{}])[0]
                 delta = choice.get("delta", {})
                 if delta.get("content"):
+                    text_bytes += len(delta["content"])
                     yield StreamEvent(kind="text", data=delta["content"])
                 for tc in delta.get("tool_calls") or []:
                     idx = tc.get("index", 0)
@@ -193,6 +201,16 @@ class OpenAICompatAdapter:
                             .get("cached_tokens", 0),
                         cache_creation_tokens=0,
                     ))
+            if not saw_done:
+                # Stream ended without `[DONE]` marker — server half-closed or
+                # network cut. This is the silent-disconnect fingerprint.
+                log.warning("%s stream ended without [DONE] "
+                            "(chunks=%d text_bytes=%d partial_tools=%d) — "
+                            "likely upstream disconnect",
+                            self.kind, chunk_count, text_bytes, len(partial_calls))
+            else:
+                log.debug("%s stream done chunks=%d text_bytes=%d tools=%d",
+                          self.kind, chunk_count, text_bytes, len(partial_calls))
             for idx in sorted(partial_calls):
                 e = partial_calls[idx]
                 try:

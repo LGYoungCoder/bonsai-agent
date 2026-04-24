@@ -79,7 +79,8 @@ class FailoverChain:
                     log.warning(alert)
                 return resp
             except Exception as e:
-                log.warning("backend %s failed: %s — falling back", b.name, e)
+                log.warning("backend %s failed [%s: %s] — falling back",
+                            b.name, type(e).__name__, e)
                 self._mark_down(b.name, loop.time())
                 last_err = e
                 continue
@@ -110,7 +111,8 @@ class FailoverChain:
                     yield ev
                 return
             except Exception as e:
-                log.warning("backend %s stream failed: %s — falling back", b.name, e)
+                log.warning("backend %s stream failed [%s: %s] — falling back",
+                            b.name, type(e).__name__, e)
                 self._mark_down(b.name, loop.time())
                 last_err = e
                 continue

@@ -101,6 +101,7 @@ def chat(
         )),
 ) -> None:
     """Interactive REPL."""
+    # Pre-config: minimal console logging so config-parse errors show up.
     logging.basicConfig(level="DEBUG" if verbose else "INFO",
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:
@@ -121,6 +122,16 @@ def chat(
         ))
         raise typer.Exit(1)
     root = (project or _project_root()).resolve()
+
+    # Post-config: full dual-output. --verbose bumps console to DEBUG; file
+    # always captures DEBUG for postmortem of silent disconnects etc.
+    from ..log_setup import setup_logging
+    console_lvl = "DEBUG" if verbose else (cfg.logging.console_level or cfg.logging.level)
+    log_path = setup_logging(
+        log_file=cfg.logging.log_file, console_level=console_lvl,
+        file_level=cfg.logging.file_level, project_root=root, force=True,
+    )
+    console.print(f"[dim]  log → {log_path}[/dim]")
 
     providers_cfg = cfg.failover_providers()
     if provider:
@@ -423,6 +434,12 @@ def channel_run(
     import socket
     cfg = load_config(config)
     root = (project or _project_root()).resolve()
+    from ..log_setup import setup_logging
+    setup_logging(
+        log_file=cfg.logging.log_file,
+        console_level=cfg.logging.console_level or cfg.logging.level,
+        file_level=cfg.logging.file_level, project_root=root, force=True,
+    )
     lock_port = _RUNNER_LOCK_PORTS.get(kind)
     if lock_port is None:
         console.print(f"[red]未实现的 kind: {kind}[/red]")
@@ -687,6 +704,19 @@ def serve(
         raise typer.Exit(1)
 
     root = (project or _project_root()).resolve()
+    # Dual-output logging so WS disconnects / provider timeouts leave a trail.
+    # Config may not exist yet (first-run 🔑 tab); use defaults if so.
+    from ..log_setup import setup_logging
+    try:
+        _cfg_for_log = load_config(config)
+        _lcfg = _cfg_for_log.logging
+        _con = _lcfg.console_level or _lcfg.level
+        _lf, _fl = _lcfg.log_file, _lcfg.file_level
+    except Exception:
+        _con, _lf, _fl = "INFO", "./logs/bonsai.log", "DEBUG"
+    log_path = setup_logging(log_file=_lf, console_level=_con,
+                             file_level=_fl, project_root=root, force=True)
+    console.print(f"[dim]log → {log_path}[/dim]")
     # Web UI must start even without config — that's the whole point of the
     # 🔑 Models first-run tab. Don't eager-load. Each chat session lazy-loads
     # and fails cleanly if the user hasn't configured yet.
