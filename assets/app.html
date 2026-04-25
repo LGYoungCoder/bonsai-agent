@@ -266,6 +266,8 @@
   }
   .send-btn:hover { background: var(--matcha-light); }
   .send-btn:disabled { background: var(--mist); cursor: wait; }
+  .send-btn.stop-btn { background: #c44; color: #fff; }
+  .send-btn.stop-btn:hover { background: #d55; }
 
   /* ═══════ Config view ═══════ */
   .sect { scroll-margin-top: 24px; padding-bottom: 28px; }
@@ -1709,7 +1711,13 @@ function connectWS() {
   };
 
   ws.onopen = () => { state.wsConnected = true; setStatus('已连接', 'badge-ok'); };
-  ws.onclose = () => { state.wsConnected = false; setStatus('已断开', 'badge-err'); state.ws = null; };
+  ws.onclose = () => {
+    state.wsConnected = false;
+    setStatus('已断开', 'badge-err');
+    state.ws = null;
+    // 后端没了, busy 状态也得清, 否则按钮卡在「停止」上点了没用。
+    setBusy(false);
+  };
   ws.onerror = (e) => { console.error('ws error', e); setStatus('错误', 'badge-err'); };
 
   ws.onmessage = (ev) => {
@@ -1730,9 +1738,11 @@ function handleWSEvent(msg) {
     $('#chat-usage').textContent = `in ${u.in || 0} · out ${u.out || 0} · cache_read ${u.cache_read || 0}`;
   } else if (msg.kind === 'done') {
     finalizeAssistantMessage();
+    setBusy(false);
   } else if (msg.kind === 'error') {
     appendAssistantChunk(`\n[error: ${msg.data}]`);
     finalizeAssistantMessage();
+    setBusy(false);
   } else if (msg.kind === 'ask_user') {
     const reply = prompt(msg.question || '请输入:');
     if (state.ws) state.ws.send(JSON.stringify({ kind: 'ask_user_reply', reply: reply || '' }));
@@ -2028,7 +2038,9 @@ function startNewChat() {
 
 $('#btn-new-chat')?.addEventListener('click', startNewChat);
 
-$('#send-btn').addEventListener('click', sendMessage);
+$('#send-btn').addEventListener('click', () => {
+  if (state.busy) stopRun(); else sendMessage();
+});
 
 // Enter-to-send toggle — user preference, persisted.
 const _ES_KEY = 'bonsai-enter-send';
@@ -2061,6 +2073,7 @@ $('#input').addEventListener('keydown', (e) => {
 });
 
 function sendMessage() {
+  if (state.busy) return;  // 上一轮还在跑, 用户得先按「停止」
   const input = $('#input');
   const text = input.value.trim();
   if (!text) return;
@@ -2072,6 +2085,26 @@ function sendMessage() {
   state.ws.send(JSON.stringify({ kind: 'user', text }));
   input.value = '';
   input.style.height = 'auto';
+  setBusy(true);
+}
+
+function stopRun() {
+  if (!state.ws || !state.wsConnected) return;
+  state.ws.send(JSON.stringify({ kind: 'stop' }));
+  // 不立刻 setBusy(false) — 等服务端把 cancel 跑完发回 done。
+}
+
+function setBusy(b) {
+  state.busy = !!b;
+  const btn = $('#send-btn');
+  if (!btn) return;
+  if (state.busy) {
+    btn.textContent = '停止';
+    btn.classList.add('stop-btn');
+  } else {
+    btn.textContent = '发送';
+    btn.classList.remove('stop-btn');
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2612,7 +2645,41 @@ function renderMemorySection() {
         : null,
     ]));
   }
+
+  // 测试连接 — 用已保存的 config 实例化 embedder + embed 一段示例。
+  // 测的是磁盘上的 config.toml, 所以改完字段记得先保存再点测试。
+  const testRow = el('div', { class: 'field-row',
+    style: 'align-items:center; gap:10px; margin-top:8px;' });
+  const testBtn = el('button', { class: 'btn btn-sm',
+    onclick: () => testEmbedder(testBtn, testOut) }, '测试连接');
+  const testOut = el('span', { class: 'field-hint', id: 'embed-test-out' },
+    '点一下检查 embedder 能否实际产生向量(测的是已保存的 config,改完先保存)。');
+  testRow.appendChild(testBtn);
+  testRow.appendChild(testOut);
+  card.appendChild(testRow);
+
   box.appendChild(card);
+}
+
+async function testEmbedder(btn, out) {
+  btn.disabled = true;
+  out.textContent = '测试中…';
+  out.className = 'field-hint';
+  try {
+    const r = await fetchJSON('/api/memory/embed_test', { method: 'POST' });
+    if (r.ok) {
+      out.innerHTML = `<span class="badge badge-ok">OK</span> ${r.provider}` +
+        (r.model ? ` · ${r.model}` : '') +
+        ` · dim=${r.dim} · ${r.latency_ms}ms`;
+    } else {
+      const stage = r.stage === 'build' ? '初始化失败' : '调用失败';
+      out.innerHTML = `<span class="badge badge-err">${stage}</span> ${r.error}`;
+    }
+  } catch (e) {
+    out.innerHTML = `<span class="badge badge-err">请求失败</span> ${e.message}`;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function refreshMemoryStatus() {

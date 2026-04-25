@@ -68,6 +68,13 @@ class OpenAIEmbedder:
     timeout: float = 60.0
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        # 空 key 时 httpx 报的是 "Illegal header value b'Bearer '", 用户看不出
+        # 是什么意思。在这里截一下, 给个能直接照着改 config 的提示。
+        if not self.api_key:
+            raise RuntimeError(
+                "openai embedder: embed_api_key 是空的。"
+                "在 [memory] 里填 embed_api_key, 或用 $ref:env:NAME 指向已设的环境变量。"
+            )
         import httpx
         r = httpx.post(
             f"{self.base_url.rstrip('/')}/embeddings",

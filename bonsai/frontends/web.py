@@ -350,6 +350,49 @@ def make_app(root: Path, chat_factory) -> FastAPI:
         }
         return JSONResponse({"ok": True, "stores": init_stores(root, mem)})
 
+    @app.post("/api/memory/embed_test")
+    async def api_memory_embed_test() -> JSONResponse:
+        """实例化当前 config 里配置的 embedder, embed 一段示例文本,
+        返回是否连得通 + 维度 + 耗时。本地 sentence-transformers 第一次会下模型,
+        所以默认时限 60s 由各 embedder 自带。"""
+        import time
+        from ..config import load_config
+        from ..stores.embed import build_embedder
+        try:
+            cfg = load_config(root / "config.toml")
+        except FileNotFoundError:
+            raise HTTPException(400, "先保存 config.toml")
+        mem_cfg = {
+            "embed_provider": cfg.memory.embed_provider,
+            "embed_model": cfg.memory.embed_model,
+            "embed_base_url": cfg.memory.embed_base_url,
+            "embed_api_key": cfg.memory.embed_api_key,
+        }
+        try:
+            emb = build_embedder(mem_cfg)
+        except Exception as e:
+            return JSONResponse({"ok": False, "stage": "build",
+                                 "provider": mem_cfg["embed_provider"],
+                                 "error": f"{type(e).__name__}: {e}"})
+        t0 = time.monotonic()
+        try:
+            # embed 是同步的(httpx / sentence-transformers 都是阻塞);
+            # 扔到线程池别堵住 event loop。
+            vecs = await asyncio.to_thread(emb.embed, ["bonsai 连接测试"])
+        except Exception as e:
+            return JSONResponse({"ok": False, "stage": "embed",
+                                 "provider": mem_cfg["embed_provider"],
+                                 "model": mem_cfg["embed_model"],
+                                 "error": f"{type(e).__name__}: {e}",
+                                 "latency_ms": int((time.monotonic() - t0) * 1000)})
+        return JSONResponse({
+            "ok": True,
+            "provider": getattr(emb, "name", mem_cfg["embed_provider"]),
+            "model": mem_cfg["embed_model"],
+            "dim": len(vecs[0]) if vecs else 0,
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+        })
+
     # ───────────────────────── Channels ──────────────────────────────────────
 
     @app.get("/api/channels/kinds")
@@ -811,6 +854,7 @@ def make_app(root: Path, chat_factory) -> FastAPI:
         await sock.accept()
         session_ctx = None
         pending_prompt: asyncio.Future | None = None
+        run_task: asyncio.Task | None = None
 
         async def prompt_user(question: str, candidates: list[str] | None) -> str:
             nonlocal pending_prompt
@@ -822,6 +866,29 @@ def make_app(root: Path, chat_factory) -> FastAPI:
             }))
             return await pending_prompt
 
+        async def drive(loop_obj) -> None:
+            try:
+                async for ev in loop_obj.run():
+                    data = _event_to_wire(ev)
+                    await sock.send_bytes(orjson.dumps(data))
+            except asyncio.CancelledError:
+                # 用户按了停止 / WS 断了。给前端一个收尾事件再退出。
+                try:
+                    await sock.send_bytes(orjson.dumps(
+                        {"kind": "text", "data": "\n[已被用户中止]"}))
+                    await sock.send_bytes(orjson.dumps(
+                        {"kind": "done", "data": {"reason": "stopped"}}))
+                except Exception:
+                    pass
+                raise
+            except Exception as e:
+                log.exception("agent loop crashed: %s", e)
+                try:
+                    await sock.send_bytes(orjson.dumps(
+                        {"kind": "error", "data": str(e)}))
+                except Exception:
+                    pass
+
         try:
             session_ctx = chat_factory(prompt_user)
             # 一个 ws 连接 = 一次对话。AgentLoop 复用 → self.tail.messages 跨
@@ -831,13 +898,18 @@ def make_app(root: Path, chat_factory) -> FastAPI:
             while True:
                 raw = await sock.receive_text()
                 msg = orjson.loads(raw)
-                if msg.get("kind") == "user":
-                    text = msg.get("text", "")
-                    loop.add_user(text)
-                    async for ev in loop.run():
-                        data = _event_to_wire(ev)
-                        await sock.send_bytes(orjson.dumps(data))
-                elif msg.get("kind") == "resume":
+                kind = msg.get("kind")
+                if kind == "user":
+                    if run_task and not run_task.done():
+                        await sock.send_bytes(orjson.dumps(
+                            {"kind": "error", "data": "上一轮还在跑,请先停止"}))
+                        continue
+                    loop.add_user(msg.get("text", ""))
+                    run_task = asyncio.create_task(drive(loop))
+                elif kind == "stop":
+                    if run_task and not run_task.done():
+                        run_task.cancel()
+                elif kind == "resume":
                     # 切到某条历史会话继续聊。把旧 .jsonl 的消息塞进新 loop 的
                     # tail,SessionLog 改成 append 到同一个文件。
                     sid = msg.get("sid", "")
@@ -849,13 +921,13 @@ def make_app(root: Path, chat_factory) -> FastAPI:
                     except Exception as e:
                         await sock.send_bytes(orjson.dumps(
                             {"kind": "error", "data": f"resume failed: {e}"}))
-                elif msg.get("kind") == "new":
+                elif kind == "new":
                     # 开新会话 — 换 session_id + 换新 log 文件 + 清空 tail。
                     session_ctx.reset()
                     loop = session_ctx.new_loop()
                     await sock.send_bytes(orjson.dumps(
                         {"kind": "new_session", "sid": session_ctx.session_id}))
-                elif msg.get("kind") == "ask_user_reply" and pending_prompt is not None:
+                elif kind == "ask_user_reply" and pending_prompt is not None:
                     pending_prompt.set_result(msg.get("reply", ""))
                     pending_prompt = None
         except WebSocketDisconnect:
@@ -867,6 +939,12 @@ def make_app(root: Path, chat_factory) -> FastAPI:
             except Exception:
                 pass
         finally:
+            if run_task and not run_task.done():
+                run_task.cancel()
+                try:
+                    await run_task
+                except BaseException:
+                    pass
             if session_ctx:
                 session_ctx.cleanup()
 
