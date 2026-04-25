@@ -149,16 +149,66 @@ def make_app(root: Path, chat_factory) -> FastAPI:
         memory_cfg["_agent"] = agent_in
         memory_cfg["_logging"] = logging_in
         memory_cfg["_maintenance"] = body.get("maintenance") or {}
+        # Snapshot OLD channel block before we overwrite, so we can detect which
+        # already-running runners need restart due to credential changes.
+        from ..config import load_config as _load_cfg
+        config_path = root / "config.toml"
+        old_channels: dict[str, dict] = {}
+        if config_path.exists():
+            try:
+                old_channels = dict(_load_cfg(config_path).channels or {})
+            except Exception:
+                old_channels = {}
         try:
             from ..cli.setup_wizard import _write_config, init_stores
-            config_path = root / "config.toml"
             _write_config(config_path, providers=providers, memory_cfg=memory_cfg,
                           failover_chain=failover_chain)
             stores = init_stores(root, memory_cfg)
         except Exception as e:
             log.exception("config write failed")
             raise HTTPException(500, f"write failed: {e}")
-        return JSONResponse({"ok": True, "path": str(config_path), "stores": stores})
+        # Hot-reload: push the freshly written config to all in-process listeners
+        # immediately (live web sessions, in-process channel ctx if any). Channel
+        # subprocesses pick up via their own file watchers within ~2s.
+        reloaded = 0
+        new_cfg = None
+        try:
+            from ..runtime import trigger_reload
+            new_cfg = _load_cfg(config_path)
+            reloaded = trigger_reload(new_cfg)
+        except Exception as e:
+            log.warning("hot-reload after save failed: %s", e)
+        # Channel binding: restart already-running runners whose credentials
+        # changed. enabled-toggle stays user-driven via existing start/stop
+        # buttons (won't auto-start a disabled runner).
+        restarted: list[str] = []
+        try:
+            new_channels = dict((new_cfg.channels if new_cfg else {}) or {})
+            from ..channels.supervisor import (
+                _SUPPORTED, status as _ch_status, stop as _ch_stop, start as _ch_start,
+            )
+            for kind in _SUPPORTED:
+                if not _ch_status(root, kind).get("running"):
+                    continue
+                old_block = old_channels.get(kind, {}) or {}
+                new_block = new_channels.get(kind, {}) or {}
+                if not _channel_creds_changed(old_block, new_block):
+                    continue
+                allow = (new_block.get("allow") or "")
+                if isinstance(allow, list):
+                    allow = ",".join(allow)
+                try:
+                    _ch_stop(root, kind)
+                    _ch_start(root, kind, allow=allow)
+                    restarted.append(kind)
+                    log.info("channel %s auto-restarted (creds changed)", kind)
+                except Exception as e:
+                    log.warning("channel %s auto-restart failed: %s", kind, e)
+        except Exception as e:
+            log.warning("channel auto-restart sweep failed: %s", e)
+        return JSONResponse({"ok": True, "path": str(config_path),
+                             "stores": stores, "hot_reloaded": reloaded,
+                             "restarted_channels": restarted})
 
     # ───────────────────────── Sessions (chat history) ────────────────────────
 
@@ -925,6 +975,19 @@ def _redact_channel(cfg: dict) -> dict:
         else:
             out[k] = v
     return out
+
+
+def _channel_creds_changed(old: dict, new: dict) -> bool:
+    """Return True if any non-internal field differs between old and new.
+    Triggers auto-restart of a running runner so credential edits land
+    without the user manually clicking stop+start."""
+    keys = (set(old.keys()) | set(new.keys()))
+    for k in keys:
+        if k.startswith("_"):
+            continue
+        if old.get(k) != new.get(k):
+            return True
+    return False
 
 
 def _preserve_secrets(root, channels_in: dict) -> None:

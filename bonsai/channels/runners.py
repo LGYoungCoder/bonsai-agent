@@ -89,6 +89,12 @@ def run_wechat(root: Path, cfg: Config, *,
     print(f"[wechat] building agent (token_file={token_file}, buf_len={len(bot.t.updates_buf)})",
           flush=True)
     ctx = build_agent(root, cfg, system_prompt=sys_prompt)
+    # Bind ctx to hot-reload registry so config changes (provider list, failover
+    # order, agent params, memory embedder/db) propagate to all live UserSessions
+    # without restarting this runner. Watcher started by `bonsai channel-run`
+    # parent fires this. Pass root so memory store can be rebuilt.
+    from ..runtime import register_hot_reloader, reload_agent_context
+    register_hot_reloader(lambda new_cfg: reload_agent_context(ctx, new_cfg, root=root))
     sessions = PerUserSessions(ctx, root)
     install_shutdown_flush(sessions)
     install_maintenance(root, cfg)
@@ -225,8 +231,16 @@ def _handle_msg(bot, msg, sessions, cfg, media_dir, *, allowed_users):
     # Each worker runs its own asyncio loop (drive_turn is async). Using
     # asyncio.run means thread-safe event-loop isolation across uid workers.
     t_start = time.time()
+    # Progress notifier: typing indicator alone is too quiet for long tool
+    # chains (>8 turns). Send a short text every PROGRESS_EVERY tool calls.
+    PROGRESS_EVERY = 8
+    notified = [0]
+    async def _on_turn(n: int) -> None:
+        if n - notified[0] >= PROGRESS_EVERY:
+            notified[0] = n
+            _safe_send(bot, uid, f"(已调用 {n} 次工具,继续处理中…)", ctx_token)
     try:
-        reply_raw, aborted = asyncio.run(drive_turn(us, prompt))
+        reply_raw, aborted = asyncio.run(drive_turn(us, prompt, on_turn_update=_on_turn))
     except Exception as e:
         log.exception("[wx] turn failed uid=%s: %s", uid[:10], e)
         _safe_send(bot, uid, "抱歉,agent 遇到了临时错误。换个说法再试一次,或发 /new 重开会话。",

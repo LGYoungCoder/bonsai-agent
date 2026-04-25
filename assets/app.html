@@ -2418,20 +2418,60 @@ function renderProviderCard(p, idx) {
     ]),
   ]);
 
+  const chain = state.configDraft.failover || [];
+  const isPrimary = !!p.name && chain[0] === p.name;
+  const primaryBadge = isPrimary
+    ? el('span', { class: 'badge badge-ok', title: 'failover chain 第 1 位' }, '⭐ 主用')
+    : null;
+  const titleChildren = [
+    el('span', { class: 'dot' }),
+    el('span', {}, `Provider #${idx + 1}`),
+  ];
+  if (primaryBadge) titleChildren.push(primaryBadge);
+
   return el('div', { class: 'card' }, [
     el('div', { class: 'card-head' }, [
-      el('div', { class: 'card-title' }, [
-        el('span', { class: 'dot' }), el('span', {}, `Provider #${idx + 1}`),
-      ]),
+      el('div', { class: 'card-title' }, titleChildren),
       el('div', { class: 'card-actions' }, [
         testedBadge,
+        el('button', {
+          class: 'btn btn-sm',
+          disabled: isPrimary || !p.name,
+          title: !p.name ? '先填 name 再设主用' : (isPrimary ? '已是主用' : '把这个 provider 移到 failover chain 第 1 位'),
+          onclick: () => {
+            if (!p.name || isPrimary) return;
+            const ch = state.configDraft.failover || [];
+            const rest = ch.filter(n => n !== p.name);
+            state.configDraft.failover = [p.name, ...rest];
+            renderConfigView();
+          },
+        }, '⭐ 设为主用'),
+        el('button', {
+          class: 'btn btn-sm',
+          title: '复制此 provider 的所有字段为一条新记录',
+          onclick: () => {
+            const clone = { ...p, _dirty: true, _editing: false, api_key_set: false };
+            const baseName = (p.name || 'provider').replace(/-copy(-\d+)?$/, '');
+            const used = new Set((state.configDraft.providers || []).map(x => x.name));
+            let candidate = `${baseName}-copy`;
+            let n = 2;
+            while (used.has(candidate)) candidate = `${baseName}-copy-${n++}`;
+            clone.name = candidate;
+            state.configDraft.providers.splice(idx + 1, 0, clone);
+            renderConfigView();
+          },
+        }, '📋 复制'),
         el('button', {
           class: 'btn btn-sm',
           onclick: () => testProvider(idx),
         }, '测试连通'),
         el('button', {
           class: 'btn btn-ghost btn-sm',
-          onclick: () => { state.configDraft.providers.splice(idx, 1); renderConfigView(); },
+          onclick: () => {
+            if (!confirm(`确认移除 provider "${p.name || `#${idx+1}`}"?保存前可点"重置"撤销。`)) return;
+            state.configDraft.providers.splice(idx, 1);
+            renderConfigView();
+          },
         }, '移除'),
       ]),
     ]),
@@ -3011,7 +3051,13 @@ $('#btn-save').addEventListener('click', async () => {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    hint.textContent = `已保存 · ${res.path}`;
+    const reloaded = (res.hot_reloaded ?? 0);
+    const restarted = (res.restarted_channels || []);
+    const parts = [];
+    if (reloaded > 0) parts.push(`${reloaded} 个会话已热加载`);
+    if (restarted.length) parts.push(`已重启 channel: ${restarted.join(', ')} (凭据变化)`);
+    if (parts.length === 0) parts.push('channel 子进程 ~2s 内自动 reload');
+    hint.textContent = `已保存 · ${parts.join(' · ')}`;
     hint.style.color = 'var(--jade)';
     $('#first-run-banner').classList.add('hidden');
     // invalidate caches so skills / doctor pick up seeded state next time

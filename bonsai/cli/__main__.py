@@ -440,6 +440,15 @@ def channel_run(
         console_level=cfg.logging.console_level or cfg.logging.level,
         file_level=cfg.logging.file_level, project_root=root, force=True,
     )
+    # Hot-reload logging on config.toml change (channel runner subprocess).
+    from ..runtime import register_hot_reloader as _reg_logging_reload
+    def _reload_logging(_cfg) -> None:
+        setup_logging(
+            log_file=_cfg.logging.log_file,
+            console_level=_cfg.logging.console_level or _cfg.logging.level,
+            file_level=_cfg.logging.file_level, project_root=root, force=True,
+        )
+    _reg_logging_reload(_reload_logging)
     lock_port = _RUNNER_LOCK_PORTS.get(kind)
     if lock_port is None:
         console.print(f"[red]未实现的 kind: {kind}[/red]")
@@ -451,9 +460,15 @@ def channel_run(
         console.print(f"[red]另一个 {kind} runner 已在运行 (port {lock_port} 被占)[/red]")
         raise typer.Exit(1)
     allowed = {u.strip() for u in allow.split(",") if u.strip()} if allow else None
+    # Hot-reload: watch config.toml from this subprocess so provider/failover
+    # edits saved via Web UI propagate without restarting the runner.
+    from ..runtime import start_config_watcher
+    _config_path = (config or (root / "config.toml")).resolve()
+    start_config_watcher(_config_path)
     console.print(Panel.fit(
         f"[bold]{kind} runner[/bold] · root={root}\n"
-        f"allowed_users={allowed or '(config/任何人)'}",
+        f"allowed_users={allowed or '(config/任何人)'}\n"
+        f"config hot-reload: {_config_path}",
         style="green", title="启动",
     ))
     try:
@@ -717,6 +732,16 @@ def serve(
     log_path = setup_logging(log_file=_lf, console_level=_con,
                              file_level=_fl, project_root=root, force=True)
     console.print(f"[dim]log → {log_path}[/dim]")
+    # Hot-reload: re-apply logging config when config.toml changes.
+    from ..runtime import register_hot_reloader as _reg_logging_reload
+    def _reload_logging(_cfg) -> None:
+        setup_logging(
+            log_file=_cfg.logging.log_file,
+            console_level=_cfg.logging.console_level or _cfg.logging.level,
+            file_level=_cfg.logging.file_level,
+            project_root=root, force=True,
+        )
+    _reg_logging_reload(_reload_logging)
     # Web UI must start even without config — that's the whole point of the
     # 🔑 Models first-run tab. Don't eager-load. Each chat session lazy-loads
     # and fails cleanly if the user hasn't configured yet.
@@ -732,7 +757,14 @@ def serve(
         return _WebSessionCtx(cfg=cfg, root=root, prompt_user=prompt_user)
 
     web_app = make_app(root, chat_factory)
+    # Hot-reload: cross-process config sync. Web UI's POST /api/config also
+    # triggers reload directly (in-process), but the watcher catches hand-edits
+    # and (when running) backs up that direct path.
+    from ..runtime import start_config_watcher
+    _config_path = (config or (root / "config.toml")).resolve()
+    start_config_watcher(_config_path)
     console.print(f"[green]Bonsai Web[/green] on http://{host}:{port}/")
+    console.print(f"[dim]config hot-reload: watching {_config_path}[/dim]")
     console.print("[dim]首次使用请在浏览器中进入 🔑 模型 标签页配置 provider。[/dim]")
     # access_log=False silences the per-request INFO lines (the poll
     # endpoints spam every ~2s). Real errors still come through at WARNING.
@@ -793,7 +825,12 @@ class _WebSessionCtx:
         providers_cfg = cfg.failover_providers()
         backends = [build_adapter(p) for p in providers_cfg]
         self._monitor = CacheMonitor(log_path=Path(cfg.logging.cache_stats))
-        self._chain = FailoverChain(backends=backends, monitor=self._monitor)
+        # Wrap in MutableBackend so config.toml changes can hot-swap the chain
+        # into this live session without forcing a browser reconnect.
+        from ..core.backend import MutableBackend
+        from ..runtime import register_hot_reloader
+        self._chain = MutableBackend(FailoverChain(backends=backends, monitor=self._monitor))
+        self._unregister_reload = register_hot_reloader(self._on_config_reload)
 
         self._skill_store = SkillStore((root / cfg.memory.skill_dir.lstrip("./")).resolve())
         self._skill_store.init()
@@ -872,7 +909,49 @@ class _WebSessionCtx:
         self._log_path = self._root / "logs" / "sessions" / f"{new_sid}.jsonl"
         self._sess_log = SessionLog(self._log_path, new_sid)
 
+    def _on_config_reload(self, cfg) -> None:
+        """Hot-reload callback: swap the provider chain + refresh agent params
+        + rebuild memory store if embedder/db changed. Visible immediately to
+        in-flight loop.run() on the next backend.stream() call. New AgentLoop
+        instances pick up max_turns / budget too."""
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+        try:
+            new_chain = FailoverChain(
+                backends=[build_adapter(p) for p in cfg.failover_providers()],
+                monitor=self._monitor,
+            )
+            self._chain.swap(new_chain)
+            self._policy = BudgetPolicy(soft=cfg.agent.budget_soft, hard=cfg.agent.budget_hard)
+        except Exception as e:
+            _log.warning("_WebSessionCtx provider hot reload skipped: %s", e)
+            return
+        # Memory store: only rebuild when something memory-related changed.
+        from ..runtime import _memory_settings_changed, _rebuild_memory_store
+        if _memory_settings_changed(self._cfg, cfg):
+            try:
+                new_store = _rebuild_memory_store(self._root, cfg)
+            except Exception as e:
+                _log.warning("memory hot reload skipped (rebuild failed): %s", e)
+            else:
+                old_store = self._memory_store
+                self._memory_store = new_store
+                self._handler.memory_store = new_store
+                try:
+                    if old_store is not None:
+                        old_store.close()
+                except Exception as e:
+                    _log.debug("old memory_store close failed: %s", e)
+                _log.info("web ctx memory store hot-reloaded "
+                          "(embed_provider=%s db=%s)",
+                          cfg.memory.embed_provider, cfg.memory.memory_db)
+        self._cfg = cfg
+
     def cleanup(self) -> None:
+        try:
+            self._unregister_reload()
+        except Exception:
+            pass
         if self._log_path.exists():
             schedule_ingest(
                 self._log_path,

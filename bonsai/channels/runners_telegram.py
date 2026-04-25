@@ -68,6 +68,8 @@ def run_telegram(root: Path, cfg: Config, *,
     )
     print(f"[telegram] building agent (token=***{token[-6:]})", flush=True)
     ctx = build_agent(root, cfg, system_prompt=sys_prompt)
+    from ..runtime import register_hot_reloader, reload_agent_context
+    register_hot_reloader(lambda new_cfg: reload_agent_context(ctx, new_cfg, root=root))
     sessions = PerUserSessions(ctx, root)
     install_shutdown_flush(sessions)
     install_maintenance(root, cfg)

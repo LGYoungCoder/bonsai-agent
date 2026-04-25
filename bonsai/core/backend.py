@@ -33,6 +33,47 @@ class Backend(Protocol):
         ...
 
 
+class MutableBackend:
+    """Hot-swappable wrapper around a FailoverChain.
+
+    AgentLoop captures backend by reference at __init__; this box lets us
+    replace the underlying chain (e.g. when config.toml changes) without
+    invalidating live UserSessions / AgentLoops. Forwards the Backend
+    Protocol; per-call delegation reads `_chain` fresh so an in-flight
+    swap takes effect on the next call.
+    """
+
+    kind: str = "mutable"
+
+    def __init__(self, chain: FailoverChain) -> None:
+        self._chain = chain
+
+    def swap(self, new_chain: FailoverChain) -> None:
+        self._chain = new_chain
+
+    @property
+    def chain(self) -> FailoverChain:
+        return self._chain
+
+    @property
+    def name(self) -> str:
+        bs = self._chain.backends
+        return bs[0].name if bs else ""
+
+    @property
+    def model(self) -> str:
+        bs = self._chain.backends
+        return bs[0].model if bs else ""
+
+    async def chat(self, prefix: FrozenPrefix, tail: DynamicTail, **opts: Any) -> Response:
+        return await self._chain.chat(prefix, tail, **opts)
+
+    async def stream(self, prefix: FrozenPrefix, tail: DynamicTail,
+                     **opts: Any) -> AsyncIterator[StreamEvent]:
+        async for ev in self._chain.stream(prefix, tail, **opts):
+            yield ev
+
+
 @dataclass
 class FailoverChain:
     """Sequential backend chain with exponential backoff per provider.

@@ -137,6 +137,33 @@ class AgentLoop:
                     yield StreamEvent(kind="text", data=acc_text)
                 yield StreamEvent(kind="usage", data=usage)
 
+            # Empty-response recovery: stream finished cleanly but model
+            # produced no text and no tool_calls. Common with GLM during
+            # multi-turn tool dialogues. Try chat() once, then surface a
+            # visible fallback so drive_turn never returns "".
+            if not acc_text and not tool_calls:
+                log.warning("empty turn (%s/%s) after stream — retrying via chat()",
+                            getattr(self.backend, "name", "?"),
+                            getattr(self.backend, "model", "?"))
+                try:
+                    resp = await self.backend.chat(self.prefix, self.tail)
+                    acc_text = resp.content or ""
+                    tool_calls = list(resp.tool_calls)
+                    if resp.usage:
+                        usage = resp.usage
+                    provider = resp.provider
+                    model = resp.model
+                    if acc_text:
+                        yield StreamEvent(kind="text", data=acc_text)
+                except Exception as e:
+                    log.warning("empty-turn chat() retry failed [%s: %s]",
+                                type(e).__name__, e)
+                if not acc_text and not tool_calls:
+                    fallback = "(模型这一轮没有返回内容。换个说法重发,或 /new 重开会话。)"
+                    log.warning("empty turn after retry — surfacing fallback to user")
+                    yield StreamEvent(kind="text", data=fallback)
+                    acc_text = fallback
+
             # Surface tool calls after text — matches non-streaming shape.
             for tc in tool_calls:
                 yield StreamEvent(kind="tool_call", data=tc)
