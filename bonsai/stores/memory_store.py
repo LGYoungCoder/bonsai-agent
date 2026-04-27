@@ -120,7 +120,12 @@ class MemoryStore:
     def __init__(self, db_path: Path, embedder: Embedder | None = None) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.db_path))
+        # check_same_thread=False: WeChat / 其他渠道 runner 用 PerUidSerializer
+        # 给每个 uid 起 worker 线程,worker 里要访问主线程建好的 conn
+        # (_refresh_prefix → wake_up_l1, memory_search 工具 → search)。默认会抛
+        # ProgrammingError "objects created in a thread can only be used in that
+        # same thread"。WAL + 读为主 + 写都在 ingest 子进程里,共用 conn 安全。
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.executescript(_SCHEMA)

@@ -42,6 +42,8 @@ async def run_stdio(cfg: Any, root: Path) -> None:
         embedder=build_embedder({
             "embed_provider": cfg.memory.embed_provider,
             "embed_model": cfg.memory.embed_model,
+            "embed_api_key": cfg.memory.embed_api_key,
+            "embed_base_url": cfg.memory.embed_base_url,
         }),
     )
     session = Session(cwd=root)

@@ -834,8 +834,12 @@ class _WebSessionCtx:
 
         self._skill_store = SkillStore((root / cfg.memory.skill_dir.lstrip("./")).resolve())
         self._skill_store.init()
+        # 漏 embed_api_key/embed_base_url 时, openai 后端会用空 key + 默认 base_url,
+        # search() 触发时报 "embed_api_key 是空的"。这里必须把 4 个字段都带上。
         embed_cfg = {"embed_provider": cfg.memory.embed_provider,
-                     "embed_model": cfg.memory.embed_model}
+                     "embed_model": cfg.memory.embed_model,
+                     "embed_api_key": cfg.memory.embed_api_key,
+                     "embed_base_url": cfg.memory.embed_base_url}
         self._memory_store = MemoryStore(
             (root / cfg.memory.memory_db.lstrip("./")).resolve(),
             embedder=build_embedder(embed_cfg),
