@@ -863,7 +863,7 @@ function renderStats() {
       _stat('Input', _fmtK(t.input_tokens)),
       _stat('Output', _fmtK(t.output_tokens)),
       _stat('Cache', _fmtK(t.cache_read_tokens)),
-      _stat('命中率', ((t.hit_rate || 0) * 100).toFixed(1) + '%'),
+      _stat('命中率', _hitRateLabel(t)),
       _stat('成本 ¥', (r.est_cost_cny || 0).toFixed(2)),
     ]),
   ]));
@@ -899,7 +899,7 @@ function _renderTodayHero(t) {
       _heroCell('¥' + (today.cost_cny || 0).toFixed(2), '今日花费', delta.cost, avg7.cost_cny, v => '¥' + v.toFixed(2)),
       _heroCell(today.requests || 0, '请求数', delta.requests, avg7.requests),
       _heroCell(_fmtK(tokens), '总 tokens', delta.tokens, avg7.tokens_total, _fmtK),
-      _heroCell(((today.hit_rate || 0) * 100).toFixed(1) + '%', 'cache 命中率', null, null),
+      _heroCell(_hitRateLabel(today), 'cache 命中率', null, null),
     ]),
     today.top_model ? el('div', { class: 'field-hint', style: 'margin-top:10px;' },
       `今日主力模型: ${today.top_model}`) : null,
@@ -1113,7 +1113,11 @@ function _renderHitRateTrend(trend) {
   // 里只有 6 天用过 × 100% + 8 天闲着 × 0% = 43%, 跟下面 14 天总览的 100% 对不上。
   const totalRead = trend.reduce((s, t) => s + (t.cache_read || 0), 0);
   const totalCache = trend.reduce((s, t) => s + (t.cache_total || 0), 0);
+  const totalCreate = totalCache - totalRead;
   const avg = totalCache > 0 ? (totalRead / totalCache) * 100 : 0;
+  // 当 provider 不上报 cache_creation (GLM / OpenAI-compat) 时, 分母只剩
+  // read, 公式恒 100% —— 趋势线没诊断意义, 别假装。
+  const reliable = totalCreate > 0 || totalRead === 0;
   const svg = `
     <svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg" style="display:block;">
       <line x1="${pad}" x2="${w - pad}"
@@ -1125,14 +1129,29 @@ function _renderHitRateTrend(trend) {
   const card = el('div', { class: 'card' }, [
     el('div', { class: 'card-head' },
       [el('div', { class: 'card-title' },
-        [el('span', { class: 'dot' }), 'Cache 命中率趋势 · 均值 ' + avg.toFixed(0) + '%'])]),
+        [el('span', { class: 'dot' }),
+         'Cache 命中率趋势 · 均值 ' + avg.toFixed(0) + '%'
+           + (reliable ? '' : ' ⚠')])]),
   ]);
   const box = document.createElement('div');
   box.innerHTML = svg;
   card.appendChild(box);
   card.appendChild(el('div', { class: 'field-hint', style: 'margin-top:4px;' },
-    `虚线是 70% 警戒线; 掉到虚线下面说明 prefix 在抖, 查下 wakeup 是不是每回合都换字节`));
+    reliable
+      ? `虚线是 70% 警戒线; 掉到虚线下面说明 prefix 在抖, 查下 wakeup 是不是每回合都换字节`
+      : `⚠ provider 只上报 cache_read 不报 cache_creation (GLM / 多数 OpenAI-compat 的特性), 分母缺一半 → 公式恒 100%, 这条趋势线没诊断价值。换 Anthropic 官方接口才能看到真实命中率。`));
   return card;
+}
+
+// 命中率 = read / (read + create). 当 provider 只报 read 不报 create
+// (GLM / 各 OpenAI-compat) 时, 公式恒为 100% — 是假象, 标个警告而不是
+// 静悄悄骗人。bucket.hit_rate_reliable 由后端 _bucket_to_dict 写入。
+function _hitRateLabel(bucket) {
+  const pct = ((bucket && bucket.hit_rate || 0) * 100).toFixed(1) + '%';
+  if (bucket && bucket.hit_rate_reliable === false) {
+    return pct + ' ⚠';   // hover 看 hint; 实际意义见下面的 trend 卡片
+  }
+  return pct;
 }
 
 function _stat(lbl, val) {

@@ -117,6 +117,10 @@ def _bucket_to_dict(b: Bucket, model: str | None = None) -> dict:
     d = asdict(b)
     d["hit_rate"] = round(b.hit_rate, 3)
     d["total_in"] = b.total_in
+    # hit_rate = read / (read + create). 当 provider(GLM/openai-compat 等) 只报
+    # cache_read 不报 cache_creation 时, 分母只剩 read, 公式恒为 100% — 假象。
+    # 标记一下让 UI 不要假装一切正常。
+    d["hit_rate_reliable"] = not (b.cache_creation_tokens == 0 and b.cache_read_tokens > 0)
     if model is not None:
         d["est_cost_cny"] = round(b.estimate_cost_cny(model), 4)
     return d
