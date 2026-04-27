@@ -79,7 +79,7 @@ def build_agent(root: Path, cfg: Config, *,
     )
 
     base_sys = system_prompt
-    prefix_text = render_wakeup_prefix(base_sys, skill_store, memory_store)
+    prefix_text = render_wakeup_prefix(base_sys, skill_store, memory_store, cwd=root)
 
     schema_path = root / "tools" / "schema.json"
     # Always expose web_* tools — Handler lazy-spawns a managed chromium
@@ -117,17 +117,25 @@ def build_agent(root: Path, cfg: Config, *,
                          cfg=cfg, base_system_prompt=base_sys)
 
 
-def render_wakeup_prefix(base_sys: str, skill_store, memory_store) -> str:
-    """Compose system_prompt + current wakeup render. Called both at
-    build_agent() time AND every turn by callers that want dynamic refresh.
+def render_wakeup_prefix(base_sys: str, skill_store, memory_store,
+                          *, cwd: Path | None = None) -> str:
+    """Compose Environment + system_prompt + current wakeup render. Called
+    both at build_agent() time AND every turn by callers that want dynamic
+    refresh.
 
-    Deterministic: given identical skill_store / memory_store state the
-    output is byte-identical, so repeated use keeps the prompt cache hot.
+    Environment block goes first — it's ground truth, not personality. The
+    model needs to know "where am I" before "who am I" or it defaults to
+    sudo-on-Windows level mistakes.
+
+    Deterministic: same skill_store / memory_store / cwd → byte-identical
+    output (env snapshot is lru_cache'd per cwd), so repeated use keeps the
+    prompt cache hot.
     """
+    from .env import render_block as _env_block
+    env = _env_block(cwd)
     w = build_wakeup(skill_store, memory_store).render()
-    if not w:
-        return base_sys
-    return f"{base_sys}\n\n{w}" if base_sys else w
+    parts = [env, base_sys, w]
+    return "\n\n".join(p for p in parts if p)
 
 
 async def _default_prompt(question: str, candidates: list[str] | None) -> str:

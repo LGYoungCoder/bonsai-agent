@@ -184,7 +184,8 @@ def chat(
 
     def _fresh_prefix() -> FrozenPrefix:
         return FrozenPrefix(
-            system_prompt=render_wakeup_prefix(base_sys, skill_store, memory_store),
+            system_prompt=render_wakeup_prefix(base_sys, skill_store, memory_store,
+                                                cwd=root),
             tools=tool_specs,
         )
 
@@ -871,7 +872,8 @@ class _WebSessionCtx:
         """Compose system_prompt + current wakeup. Byte-stable for cache."""
         return FrozenPrefix(
             system_prompt=self._render_wakeup_prefix(
-                self._base_sys, self._skill_store, self._memory_store),
+                self._base_sys, self._skill_store, self._memory_store,
+                cwd=self._root),
             tools=self._tool_specs,
         )
 

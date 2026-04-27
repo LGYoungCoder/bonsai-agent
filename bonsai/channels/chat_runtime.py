@@ -285,7 +285,7 @@ class PerUserSessions:
         ms = getattr(ctx.handler, "memory_store", None)
         if ss is None:
             return
-        fresh_sys = render_wakeup_prefix(ctx.base_system_prompt, ss, ms)
+        fresh_sys = render_wakeup_prefix(ctx.base_system_prompt, ss, ms, cwd=self.root)
         if fresh_sys != us.loop.prefix.system_prompt:
             us.loop.prefix = FrozenPrefix(system_prompt=fresh_sys,
                                            tools=us.loop.prefix.tools,
