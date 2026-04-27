@@ -35,6 +35,15 @@ def make_app(root: Path, chat_factory) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app):
+        # Restart already-running runners whose bytecode pre-dates the package
+        # source. Without this, `git pull` + serve restart leaves runners on
+        # stale bytecode → confusing cross-thread / missing-attr crashes that
+        # the actual code already fixed.
+        try:
+            from ..channels.supervisor import restart_stale_runners
+            restart_stale_runners(root)
+        except Exception as e:
+            log.warning("stale-runner sweep failed: %s", e)
         _autostart_channels(root)
         # Background scheduler task — runs alongside serve, stops with it.
         from ..scheduler import scheduler_loop

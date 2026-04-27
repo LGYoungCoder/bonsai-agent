@@ -1108,7 +1108,12 @@ function _renderHitRateTrend(trend) {
     const y = h - pad - ((v - min) / (max - min)) * (h - 2 * pad);
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   });
-  const avg = vals.length ? vals.reduce((s, x) => s + x, 0) / vals.length : 0;
+  // Volume-weighted: 命中率本质是 cache_read / (cache_read + cache_creation),
+  // 应该按 token 加权而不是把 per-day 率(零请求天=0%)做算术平均 —— 否则 14 天
+  // 里只有 6 天用过 × 100% + 8 天闲着 × 0% = 43%, 跟下面 14 天总览的 100% 对不上。
+  const totalRead = trend.reduce((s, t) => s + (t.cache_read || 0), 0);
+  const totalCache = trend.reduce((s, t) => s + (t.cache_total || 0), 0);
+  const avg = totalCache > 0 ? (totalRead / totalCache) * 100 : 0;
   const svg = `
     <svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg" style="display:block;">
       <line x1="${pad}" x2="${w - pad}"

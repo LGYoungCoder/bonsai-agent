@@ -141,6 +141,67 @@ def stop(root: Path, kind: str, *, timeout: float = 3.0) -> dict:
     return {"running": False, "killed_pid": pid}
 
 
+def _bonsai_pkg_mtime() -> float:
+    """Newest mtime among all .py files in the bonsai package — proxy for
+    'when did the code last change'. Walks ~150 files; ms-scale latency."""
+    pkg_root = Path(__file__).resolve().parent.parent  # bonsai/
+    latest = 0.0
+    for p in pkg_root.rglob("*.py"):
+        try:
+            m = p.stat().st_mtime
+            if m > latest:
+                latest = m
+        except OSError:
+            pass
+    return latest
+
+
+def restart_stale_runners(root: Path, *, kinds: list[str] | None = None) -> list[dict]:
+    """For each running runner, if its pid file is older than the newest
+    bonsai source file mtime, stop+start it. Caller is `bonsai serve` startup.
+
+    Why this exists: runners use `start_new_session=True` so they survive
+    `serve` restarts. Without this sweep, `git pull` + restart serve leaves
+    runners on the *previous* bytecode → confusing tracebacks where line
+    numbers from old bytecode point at docstrings in current source.
+
+    Returns one dict per kind acted on (skipped kinds omitted). Logs only.
+    """
+    pkg_mtime = _bonsai_pkg_mtime()
+    out: list[dict] = []
+    for kind in (kinds or sorted(_SUPPORTED)):
+        st = status(root, kind)
+        if not st.get("running"):
+            continue
+        pf = _pid_file(root, kind)
+        try:
+            runner_started = pf.stat().st_mtime
+        except OSError:
+            continue
+        # 30s grace: if you just started the runner manually, don't immediately
+        # restart it because some unrelated touched .py file is newer.
+        if runner_started + 30 >= pkg_mtime:
+            continue
+        age_h = (pkg_mtime - runner_started) / 3600
+        log.warning(
+            "channel %s runner pid=%s started %.1fh before latest source change "
+            "→ auto-restart so it picks up new bytecode",
+            kind, st.get("pid"), age_h,
+        )
+        old_pid = st.get("pid")
+        try:
+            stop(root, kind)
+            new_st = start(root, kind)
+            log.info("channel %s auto-restarted: pid %s → %s",
+                     kind, old_pid, new_st.get("pid"))
+            out.append({"kind": kind, "old_pid": old_pid,
+                        "new_pid": new_st.get("pid"), "stale_hours": round(age_h, 1)})
+        except Exception as e:
+            log.warning("channel %s auto-restart failed: %s", kind, e)
+            out.append({"kind": kind, "old_pid": old_pid, "error": str(e)})
+    return out
+
+
 def log_tail(root: Path, kind: str, lines: int = 200) -> str:
     lf = _log_file(root, kind)
     if not lf.exists():

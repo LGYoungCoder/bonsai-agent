@@ -483,8 +483,15 @@ def hit_rate_trend(log_path: Path, *, days: int = 14) -> list[dict]:
         day_key = _day_of(ts)
         if day_key in buckets:
             _accumulate(buckets[day_key], e)
+    # cache_read + cache_total per day so the UI can compute a *volume-weighted*
+    # mean instead of averaging per-day rates (which counts zero-request days as
+    # 0% and pulls the displayed mean way below the truth, e.g. 14d summary
+    # shows 100% but trend "mean" shows 43%).
     return [{"date": k, "hit_rate": round(v.hit_rate, 3),
-             "requests": v.requests} for k, v in buckets.items()]
+             "requests": v.requests,
+             "cache_read": v.cache_read_tokens,
+             "cache_total": v.cache_read_tokens + v.cache_creation_tokens}
+            for k, v in buckets.items()]
 
 
 def detect_anomalies(log_path: Path, *, days: int = 14,
