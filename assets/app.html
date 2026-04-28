@@ -706,6 +706,10 @@ const state = {
   doctorChecks: null,
   ws: null,
   wsConnected: false,
+  convList: null,        // sessions list (cached)
+  viewingSid: null,      // currently-opened session id (or null)
+  viewingSidOffset: 0,   // bytes consumed from viewed jsonl; advanced by polling + WS done
+  unread: {},            // sid -> count of new turns since last viewed (channel sessions only)
 };
 
 function el(tag, props = {}, children = []) {
@@ -1763,6 +1767,9 @@ function handleWSEvent(msg) {
   } else if (msg.kind === 'done') {
     finalizeAssistantMessage();
     setBusy(false);
+    // Anything we just streamed is now in the jsonl. Advance offset past it
+    // so the live-poll tick doesn't render the same turn a second time.
+    syncViewingOffset();
   } else if (msg.kind === 'error') {
     appendAssistantChunk(`\n[error: ${msg.data}]`);
     finalizeAssistantMessage();
@@ -1926,13 +1933,71 @@ function renderMarkdown(src) {
 
 // ─────────── Chat sessions (history list) ───────────
 
+function sessionSource(sid) {
+  for (const sfx of ['wechat', 'feishu', 'wecom', 'telegram', 'dingtalk']) {
+    if (sid.startsWith(sfx + '-')) return sfx;
+  }
+  return 'web';
+}
+
+function sessionsListEqual(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].id !== b[i].id || a[i].mtime !== b[i].mtime || a[i].turns !== b[i].turns) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Only channel sessions get unread dots — your own web typing isn't "unread".
+function bumpUnread(prevList, fresh) {
+  const prevByID = new Map((prevList || []).map(s => [s.id, s]));
+  for (const s of fresh) {
+    if (s.id === state.viewingSid) { delete state.unread[s.id]; continue; }
+    if ((s.source || 'web') === 'web') continue;
+    const prev = prevByID.get(s.id);
+    if (prev && s.turns > prev.turns) {
+      state.unread[s.id] = (state.unread[s.id] || 0) + (s.turns - prev.turns);
+    } else if (!prev && prevList) {
+      // Genuinely new session that appeared after we'd already loaded the list.
+      state.unread[s.id] = s.turns;
+    }
+  }
+  // Drop unread entries for sessions that no longer exist.
+  for (const id of Object.keys(state.unread)) {
+    if (!fresh.find(s => s.id === id)) delete state.unread[id];
+  }
+}
+
 async function loadConversations() {
   try {
     const d = await fetchJSON('/api/sessions');
-    state.convList = d.sessions || [];
+    const fresh = d.sessions || [];
+    if (sessionsListEqual(state.convList, fresh)) return;
+    bumpUnread(state.convList, fresh);
+    state.convList = fresh;
     renderConvList();
   } catch (e) {
     $('#conv-list').innerHTML = `<div class="conv-empty">列表加载失败: ${e.message}</div>`;
+  }
+}
+
+// Render historical entries into #messages — extracted from loadSessionView so
+// the live-poll path can append the same way.
+function renderEntries(entries) {
+  for (const e of entries || []) {
+    if (e.role === 'user' && e.content) {
+      appendUserMessage(e.content);
+    } else if (e.role === 'assistant') {
+      if (e.content) appendAssistantChunk(e.content);
+      if (e.tool_calls) {
+        for (const tc of e.tool_calls) {
+          appendToolCall({ name: tc.name, args: tc.args });
+        }
+      }
+      finalizeAssistantMessageSilent();
+    }
   }
 }
 
@@ -1955,6 +2020,11 @@ function renderConvList() {
       title: '删除会话',
       onclick: (ev) => { ev.stopPropagation(); deleteSession(s.id); },
     }, '×');
+    const unread = state.unread[s.id] || 0;
+    const dot = unread > 0
+      ? el('span', { title: `${unread} 条新消息`,
+                     style: 'flex:0 0 auto; width:8px; height:8px; border-radius:50%; background:#22c55e; box-shadow:0 0 6px rgba(34,197,94,0.55);' })
+      : null;
     const item = el('div', {
       class: 'conv-item' + (s.id === state.viewingSid ? ' active' : ''),
       style: 'display:flex; align-items:center; gap:8px;',
@@ -1963,7 +2033,7 @@ function renderConvList() {
       onmouseleave: () => { delBtn.style.opacity = '0'; },
     }, [
       el('div', { style: 'flex:1; min-width:0;' }, [
-        el('div', { style: 'font-size:13px; font-weight:500; color:var(--paper); margin-bottom:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;',
+        el('div', { style: `font-size:13px; font-weight:${unread ? '600' : '500'}; color:var(--paper); margin-bottom:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;`,
                     title: s.preview }, s.preview.slice(0, 40)),
         el('div', { class: 'provider-meta', style: 'font-size:11px; gap:8px;' }, [
           el('span', { class: `conv-src conv-src-${s.source || 'web'}` },
@@ -1972,6 +2042,7 @@ function renderConvList() {
           el('span', {}, `${s.turns} 轮`),
         ]),
       ]),
+      dot,
       delBtn,
     ]);
     list.appendChild(item);
@@ -1996,20 +2067,10 @@ async function loadSessionView(sid) {
     const d = await fetchJSON(`/api/sessions/${encodeURIComponent(sid)}`);
     $('#messages').innerHTML = '';
     currentAssistant = null;
-    for (const e of d.entries) {
-      if (e.role === 'user' && e.content) {
-        appendUserMessage(e.content);
-      } else if (e.role === 'assistant') {
-        if (e.content) appendAssistantChunk(e.content);
-        if (e.tool_calls) {
-          for (const tc of e.tool_calls) {
-            appendToolCall({ name: tc.name, args: tc.args });
-          }
-        }
-        finalizeAssistantMessageSilent();
-      }
-    }
+    renderEntries(d.entries);
     state.viewingSid = sid;
+    state.viewingSidOffset = d.offset || 0;
+    delete state.unread[sid];
     // 告诉服务端:切到这条历史,把旧 jsonl 的 messages 塞进 tail,后续写入
     // 也 append 到这个文件。服务端 resumed 后用户就能接着聊。
     if (!state.wsConnected) connectWS();
@@ -2046,6 +2107,7 @@ function finalizeAssistantMessageSilent() {
 
 function startNewChat() {
   state.viewingSid = null;
+  state.viewingSidOffset = 0;
   $('#messages').innerHTML = '';
   currentAssistant = null;
   $('#input').disabled = false;
@@ -3026,6 +3088,52 @@ setInterval(() => {
     refreshRunnerStatus(badge.id.replace('runner-badge-', ''));
   }
 }, 5000);
+
+// ─────────── Live chat refresh (sessions list + viewed session) ───────────
+// Every ~5s while the chat view is visible: refresh the conversation list so
+// new channel (wechat/feishu/…) messages appear without a manual reload, AND
+// if the user has a non-web session open, append any newly-logged entries
+// to #messages. We pause when the page is hidden and skip increment-render
+// while the WS is streaming (currentAssistant != null) or busy with our own
+// turn — both cases would otherwise double-render content we just showed.
+
+function isChatViewVisible() {
+  const v = $('#view-chat');
+  return !document.hidden && v && !v.classList.contains('hidden');
+}
+
+async function syncViewingOffset() {
+  if (!state.viewingSid) return;
+  try {
+    const d = await fetchJSON(
+      `/api/sessions/${encodeURIComponent(state.viewingSid)}?since=${state.viewingSidOffset|0}`
+    );
+    state.viewingSidOffset = d.offset || state.viewingSidOffset;
+  } catch (e) {}
+}
+
+async function tickChatLive() {
+  if (!isChatViewVisible()) return;
+  await loadConversations();
+  if (!state.viewingSid || state.busy || currentAssistant !== null) return;
+  // Only poll-render channel-source sessions — web sessions render via WS.
+  if (sessionSource(state.viewingSid) === 'web') return;
+  try {
+    const d = await fetchJSON(
+      `/api/sessions/${encodeURIComponent(state.viewingSid)}?since=${state.viewingSidOffset|0}`
+    );
+    if (d.entries && d.entries.length) {
+      renderEntries(d.entries);
+      $('#messages').scrollTop = $('#messages').scrollHeight;
+    }
+    state.viewingSidOffset = d.offset || state.viewingSidOffset;
+  } catch (e) {}
+}
+
+setInterval(() => { tickChatLive().catch(() => {}); }, 5000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) tickChatLive().catch(() => {});
+});
 
 // Live-update health row on any input inside the config view.
 document.addEventListener('input', (e) => {

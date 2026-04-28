@@ -272,7 +272,12 @@ def make_app(root: Path, chat_factory) -> FastAPI:
         return JSONResponse({"sessions": out})
 
     @app.get("/api/sessions/{sid}")
-    async def api_session_read(sid: str) -> JSONResponse:
+    async def api_session_read(sid: str, since: int = 0) -> JSONResponse:
+        """`since` = byte offset into the jsonl. When >0 only return entries
+        past it. `offset` in the response = byte position right after the
+        last *complete* (\\n-terminated) line read; pass it as `since` next
+        poll. Partial trailing lines are left for the next tick so we never
+        emit a half-written entry."""
         import json as _json
         p = _SESSIONS_DIR / f"{sid}.jsonl"
         try:
@@ -282,15 +287,28 @@ def make_app(root: Path, chat_factory) -> FastAPI:
         if not p.exists():
             raise HTTPException(404, "not found")
         entries = []
-        with p.open("r", encoding="utf-8") as f:
-            for raw in f:
-                if not raw.strip():
+        offset = max(0, int(since or 0))
+        with p.open("rb") as f:
+            size = p.stat().st_size
+            # `since` past EOF (file truncated/rotated) → reset to 0.
+            if offset > size:
+                offset = 0
+            f.seek(offset)
+            while True:
+                raw = f.readline()
+                if not raw:
+                    break
+                if not raw.endswith(b"\n"):
+                    break
+                offset += len(raw)
+                line = raw.decode("utf-8", "replace").strip()
+                if not line:
                     continue
                 try:
-                    entries.append(_json.loads(raw))
+                    entries.append(_json.loads(line))
                 except Exception:
                     continue
-        return JSONResponse({"id": sid, "entries": entries})
+        return JSONResponse({"id": sid, "entries": entries, "offset": offset})
 
     @app.delete("/api/sessions/{sid}")
     async def api_session_delete(sid: str) -> JSONResponse:
