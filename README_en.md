@@ -24,7 +24,7 @@
 
 ## In a minute
 
-Bonsai is an AI agent framework **built for a single user — you**. It differs from typical AI tools in 4 fundamental ways:
+Bonsai is an AI agent framework **built for a single user — you**. Four things make it yours alone:
 
 1. **💾 Your data stays on your disk** — memories / skills / transcripts all in local SQLite; not uploaded, not shared, not used for training
 2. **🔑 Your own keys** — swap between GLM / Claude / OpenAI / Qwen / MiniMax / DeepSeek freely; no vendor lock-in
