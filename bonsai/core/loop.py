@@ -114,6 +114,13 @@ class AgentLoop:
                             yield ev
                     elif ev.kind == "tool_call":
                         tool_calls.append(ev.data)
+                        # Heartbeat: 立即写一行 pending,让 web live-poll
+                        # 在整轮 record_assistant commit 前就能看到 agent
+                        # 决定调哪些工具。完整的 record_assistant 随后到达。
+                        if self.session_log:
+                            self.session_log.record_tool_call_pending(
+                                ev.data, turn=turn + 1,
+                            )
                     elif ev.kind == "usage":
                         usage = ev.data
                         yield ev

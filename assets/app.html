@@ -240,8 +240,26 @@
     background: var(--tool-bg); border: 1px solid var(--border);
     border-radius: 8px; font-size: 13px;
   }
+  .tool-card.pending { opacity: 0.55; border-style: dashed; }
   .tool-name { font-family: "JetBrains Mono", monospace; color: var(--matcha-light); font-size: 12px; }
   .tool-args { color: var(--mist); font-size: 11px; margin-left: 4px; }
+
+  .thinking-dots {
+    display: inline-flex; gap: 4px; margin: 8px 0 8px 30px;
+    padding: 6px 10px; background: var(--tool-bg);
+    border-radius: 999px; vertical-align: middle;
+  }
+  .thinking-dots span {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--matcha-light); opacity: 0.4;
+    animation: thinking-bounce 1.2s ease-in-out infinite;
+  }
+  .thinking-dots span:nth-child(2) { animation-delay: 0.18s; }
+  .thinking-dots span:nth-child(3) { animation-delay: 0.36s; }
+  @keyframes thinking-bounce {
+    0%, 80%, 100% { opacity: 0.35; transform: translateY(0); }
+    40% { opacity: 1; transform: translateY(-3px); }
+  }
 
   .input-area { border-top: 1px solid var(--border); padding: 14px 40px 16px; background: var(--ink); flex-shrink: 0; }
   .input-wrap {
@@ -1758,19 +1776,25 @@ function connectWS() {
 
 function handleWSEvent(msg) {
   if (msg.kind === 'text') {
+    hideThinkingDots();
     appendAssistantChunk(msg.data || '');
   } else if (msg.kind === 'tool_call') {
+    hideThinkingDots();
     appendToolCall(msg.data);
+    // 工具派发到下一轮 LLM 又是一段空白,直接续上点。
+    showThinkingDots();
   } else if (msg.kind === 'usage') {
     const u = msg.data || {};
     $('#chat-usage').textContent = `in ${u.in || 0} · out ${u.out || 0} · cache_read ${u.cache_read || 0}`;
   } else if (msg.kind === 'done') {
+    hideThinkingDots();
     finalizeAssistantMessage();
     setBusy(false);
     // Anything we just streamed is now in the jsonl. Advance offset past it
     // so the live-poll tick doesn't render the same turn a second time.
     syncViewingOffset();
   } else if (msg.kind === 'error') {
+    hideThinkingDots();
     appendAssistantChunk(`\n[error: ${msg.data}]`);
     finalizeAssistantMessage();
     setBusy(false);
@@ -1825,14 +1849,61 @@ function appendAssistantChunk(chunk) {
   });
 }
 
-function appendToolCall(data) {
+// tcid → DOM 卡片 的全局表,跨 bubble 也能把同一个 tool_call 升级。
+const toolCardsByTcid = Object.create(null);
+
+function _appendToolCardCommon(data, pending) {
   ensureAssistantMessage();
-  const card = el('div', { class: 'tool-card' }, [
+  const tcid = data.id || data.tcid || '';
+  if (tcid && toolCardsByTcid[tcid]) {
+    // 已有卡片(可能是 pending),复用并升级。
+    const existing = toolCardsByTcid[tcid];
+    if (!pending) existing.classList.remove('pending');
+    const argsEl = existing.querySelector('.tool-args');
+    if (argsEl) argsEl.textContent = JSON.stringify(data.args || {}).slice(0, 140);
+    return existing;
+  }
+  const card = el('div', { class: 'tool-card' + (pending ? ' pending' : '') }, [
     el('span', { class: 'tool-name' }, data.name || '?'),
     el('span', { class: 'tool-args' }, JSON.stringify(data.args || {}).slice(0, 140)),
   ]);
+  if (tcid) toolCardsByTcid[tcid] = card;
   currentAssistant.wrap.appendChild(card);
   $('#messages').scrollTop = $('#messages').scrollHeight;
+  return card;
+}
+
+function appendToolCall(data) { _appendToolCardCommon(data, false); }
+function appendToolCallPending(data) { _appendToolCardCommon(data, true); }
+
+// 三点指示器是顶层 DOM,不依附任何 bubble — bubble finalize 之后还能继续显示。
+let thinkingDotsEl = null;
+
+function showThinkingDots() {
+  if (thinkingDotsEl && thinkingDotsEl.parentNode) {
+    // 已经在显示;确保它还在底部(新 bubble 可能插到它后面了)。
+    const messages = $('#messages');
+    if (thinkingDotsEl.nextSibling) messages.appendChild(thinkingDotsEl);
+    return;
+  }
+  const dots = el('div', { class: 'thinking-dots' }, [
+    el('span', {}), el('span', {}), el('span', {}),
+  ]);
+  thinkingDotsEl = dots;
+  $('#messages').appendChild(dots);
+  $('#messages').scrollTop = $('#messages').scrollHeight;
+}
+
+function hideThinkingDots() {
+  if (!thinkingDotsEl) return;
+  if (thinkingDotsEl.parentNode) thinkingDotsEl.parentNode.removeChild(thinkingDotsEl);
+  thinkingDotsEl = null;
+}
+
+// 切换 session 或 /new 时调用 — 清掉所有指示器状态,避免残留引用悬空 DOM。
+function _resetIndicatorState() {
+  thinkingDotsEl = null;
+  for (const k of Object.keys(toolCardsByTcid)) delete toolCardsByTcid[k];
 }
 
 function finalizeAssistantMessage() {
@@ -1986,18 +2057,41 @@ async function loadConversations() {
 // Render historical entries into #messages — extracted from loadSessionView so
 // the live-poll path can append the same way.
 function renderEntries(entries) {
+  let lastRole = null;
+  let lastAsstHadToolCalls = false;
   for (const e of entries || []) {
     if (e.role === 'user' && e.content) {
+      // 新一轮用户消息进来,把上一轮残留的指示器清掉。
+      hideThinkingDots();
       appendUserMessage(e.content);
     } else if (e.role === 'assistant') {
+      // assistant 整轮 commit 到来,先把这一轮之前显示的灰点收掉,
+      // 让真正的卡片/文字落到对话流里。
+      hideThinkingDots();
       if (e.content) appendAssistantChunk(e.content);
       if (e.tool_calls) {
         for (const tc of e.tool_calls) {
-          appendToolCall({ name: tc.name, args: tc.args });
+          appendToolCall({ id: tc.id, name: tc.name, args: tc.args });
         }
       }
+      lastAsstHadToolCalls = !!(e.tool_calls && e.tool_calls.length);
       finalizeAssistantMessageSilent();
+    } else if (e.role === 'tool_call_pending') {
+      appendToolCallPending({ tcid: e.tcid, name: e.name, args: e.args });
     }
+    // role === 'tool' (tool_results) 不需要单独 DOM —— 卡片已存在,
+    // 后续的 assistant.tool_calls 升级会刷新它。
+    lastRole = e.role;
+  }
+  // 推断"还在跑": 只有"最后一行是 assistant 且没有 tool_calls"才算 done。
+  // 其余尾巴(user / tool_call_pending / tool / assistant+tool_calls)都
+  // 意味着下一轮 LLM/工具还在路上,挂三点继续提示。
+  const stillWorking = lastRole !== null
+    && !(lastRole === 'assistant' && !lastAsstHadToolCalls);
+  if (stillWorking) {
+    showThinkingDots();
+  } else {
+    hideThinkingDots();
   }
 }
 
@@ -2067,6 +2161,7 @@ async function loadSessionView(sid) {
     const d = await fetchJSON(`/api/sessions/${encodeURIComponent(sid)}`);
     $('#messages').innerHTML = '';
     currentAssistant = null;
+    _resetIndicatorState();
     renderEntries(d.entries);
     state.viewingSid = sid;
     state.viewingSidOffset = d.offset || 0;
@@ -2110,6 +2205,7 @@ function startNewChat() {
   state.viewingSidOffset = 0;
   $('#messages').innerHTML = '';
   currentAssistant = null;
+  _resetIndicatorState();
   $('#input').disabled = false;
   $('#input').placeholder = '输入消息 · ⌘/Ctrl + ↵ 发送';
   $('#send-btn').disabled = false;
@@ -2172,6 +2268,8 @@ function sendMessage() {
   input.value = '';
   input.style.height = 'auto';
   setBusy(true);
+  // 立刻挂三点:LLM TTFT 之前不留视觉空白。第一个 text/tool_call 到达后摘掉。
+  showThinkingDots();
 }
 
 function stopRun() {
@@ -3115,9 +3213,14 @@ async function syncViewingOffset() {
 async function tickChatLive() {
   if (!isChatViewVisible()) return;
   await loadConversations();
-  if (!state.viewingSid || state.busy || currentAssistant !== null) return;
-  // Only poll-render channel-source sessions — web sessions render via WS.
-  if (sessionSource(state.viewingSid) === 'web') return;
+  if (!state.viewingSid) return;
+  // Web 渠道才走 WS 流,polling 一进 web session 就会双重渲染 → 跳过。
+  // 同时 ws 自己 streaming 期间也跳过,避免 currentAssistant 跟历史轮重叠。
+  if (sessionSource(state.viewingSid) === 'web') {
+    if (state.busy || currentAssistant !== null) return;
+    // Web 会话静默时仍要 poll —— ws 可能掉线,polling 兜底。
+  }
+  // Channel 渠道(wechat/feishu/...): 永远 poll,跟 ws 状态无关。
   try {
     const d = await fetchJSON(
       `/api/sessions/${encodeURIComponent(state.viewingSid)}?since=${state.viewingSidOffset|0}`

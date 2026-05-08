@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
 import orjson
 
 from .types import Message, ToolCall, ToolResult
+
+log = logging.getLogger(__name__)
 
 
 def load_messages(path: Path) -> list[Message]:
@@ -82,4 +85,36 @@ class SessionLog:
                  "is_error": tr.is_error}
                 for tr in msg.tool_results
             ],
+        })
+
+    def reload_into(self, loop) -> int:
+        """Refresh `loop.tail.messages` from this session's jsonl on disk.
+
+        Cross-process consistency: web server (in-process) and channel runner
+        (subprocess) both share this jsonl as the source of truth. Calling
+        this before `add_user` lets each side pick up messages the other side
+        wrote since the last turn — so a conversation can flow across web
+        and WeChat without diverging.
+
+        Returns the message count loaded. Best-effort: missing or unreadable
+        files leave `loop.tail.messages` untouched.
+        """
+        try:
+            msgs = load_messages(self.path)
+        except Exception as e:
+            log.warning("reload_into %s failed: %s", self.path.name, e)
+            return len(loop.tail.messages)
+        # Replace wholesale — disk is source of truth post-reload, including
+        # other-process turns we haven't seen. Compression cache is dropped;
+        # next loop.run() will re-compress if needed.
+        loop.tail.messages = msgs
+        return len(msgs)
+
+    def record_tool_call_pending(self, tc: ToolCall, *, turn: int = 0) -> None:
+        # 心跳行: stream 还没 commit 整轮 record_assistant 时,先写一条
+        # 让 web live-poll 能立刻看到"agent 决定调工具了"。被随后到来的
+        # record_assistant 在视觉上覆盖,load_messages 不重放此 role。
+        self._write({
+            "role": "tool_call_pending", "turn": turn,
+            "tcid": tc.id, "name": tc.name, "args": tc.args,
         })

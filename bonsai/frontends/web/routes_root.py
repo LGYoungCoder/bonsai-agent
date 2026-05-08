@@ -61,27 +61,38 @@ def make_router(root: Path, chat_factory) -> APIRouter:
             return await pending_prompt
 
         async def drive(loop_obj) -> None:
+            # sock 一旦发不出(断线/刷新),停止往 ws 推,但继续 iterate
+            # loop.run() 让 turn 跑完。session_log 会把整轮 commit 到 jsonl,
+            # 用户回到页面后通过 /api/sessions/{sid} 的 live-poll 看到结果。
+            sock_alive = True
             try:
                 async for ev in loop_obj.run():
-                    data = _event_to_wire(ev)
-                    await sock.send_bytes(orjson.dumps(data))
+                    if sock_alive:
+                        try:
+                            data = _event_to_wire(ev)
+                            await sock.send_bytes(orjson.dumps(data))
+                        except Exception:
+                            sock_alive = False
+                            log.info("ws send failed mid-turn — continuing in bg")
             except asyncio.CancelledError:
-                # 用户按了停止 / WS 断了。给前端一个收尾事件再退出。
-                try:
-                    await sock.send_bytes(orjson.dumps(
-                        {"kind": "text", "data": "\n[已被用户中止]"}))
-                    await sock.send_bytes(orjson.dumps(
-                        {"kind": "done", "data": {"reason": "stopped"}}))
-                except Exception:
-                    pass
+                # /stop 显式触发,disconnect 现在不再 cancel(见 finally)。
+                if sock_alive:
+                    try:
+                        await sock.send_bytes(orjson.dumps(
+                            {"kind": "text", "data": "\n[已被用户中止]"}))
+                        await sock.send_bytes(orjson.dumps(
+                            {"kind": "done", "data": {"reason": "stopped"}}))
+                    except Exception:
+                        pass
                 raise
             except Exception as e:
                 log.exception("agent loop crashed: %s", e)
-                try:
-                    await sock.send_bytes(orjson.dumps(
-                        {"kind": "error", "data": str(e)}))
-                except Exception:
-                    pass
+                if sock_alive:
+                    try:
+                        await sock.send_bytes(orjson.dumps(
+                            {"kind": "error", "data": str(e)}))
+                    except Exception:
+                        pass
 
         try:
             session_ctx = chat_factory(prompt_user)
@@ -98,6 +109,13 @@ def make_router(root: Path, chat_factory) -> APIRouter:
                         await sock.send_bytes(orjson.dumps(
                             {"kind": "error", "data": "上一轮还在跑,请先停止"}))
                         continue
+                    # 跨进程一致性: WeChat runner (子进程) 可能在我们等的间隙
+                    # 写过新消息到同一 jsonl, 先把磁盘最新状态拉进 tail 再 add。
+                    if loop.session_log is not None:
+                        try:
+                            loop.session_log.reload_into(loop)
+                        except Exception as e:
+                            log.warning("ws reload failed: %s", e)
                     loop.add_user(msg.get("text", ""))
                     run_task = asyncio.create_task(drive(loop))
                 elif kind == "stop":
@@ -133,13 +151,20 @@ def make_router(root: Path, chat_factory) -> APIRouter:
             except Exception:
                 pass
         finally:
-            if run_task and not run_task.done():
-                run_task.cancel()
-                try:
-                    await run_task
-                except BaseException:
-                    pass
-            if session_ctx:
-                session_ctx.cleanup()
+            # 旧行为: ws 一断就 cancel run_task → 用户刷新就丢工作。改成:
+            # 让 in-flight turn 在后台跑完,再 cleanup(memory_store.close 必须
+            # 等 turn 不再访问 store)。下次 ws 连接时 jsonl 已是完整状态。
+            async def _drain_then_cleanup():
+                if run_task and not run_task.done():
+                    try:
+                        await run_task
+                    except BaseException:
+                        pass
+                if session_ctx:
+                    try:
+                        session_ctx.cleanup()
+                    except Exception as e:
+                        log.warning("deferred cleanup failed: %s", e)
+            asyncio.create_task(_drain_then_cleanup())
 
     return router

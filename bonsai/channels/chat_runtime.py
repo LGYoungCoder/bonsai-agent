@@ -722,6 +722,14 @@ async def drive_turn(us: UserSession, user_text: str,
     """Feed `user_text` into the user's loop and collect streamed text.
     Returns (reply_text, aborted_flag). Caller strips/splits for their IM."""
     loop = us.loop
+    # 跨进程一致性: web server 进程可能在我们等的间隙写过新消息到同一个
+    # jsonl,先把磁盘最新状态拉进 tail 再 add_user。否则两个进程各自维护
+    # 内存 tail,同一个对话会分裂。
+    if loop.session_log is not None:
+        try:
+            loop.session_log.reload_into(loop)
+        except Exception as e:
+            log.warning("drive_turn reload failed (uid=%s): %s", us.uid[:8], e)
     loop.add_user(user_text)
     us.aborted = False
     # Remember a preview (first 60 chars of stripped text) for /chat list.
