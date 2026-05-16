@@ -22,6 +22,8 @@ from pathlib import Path
 
 import httpx
 
+from ..._proc import DETACH_KWARGS
+
 log = logging.getLogger(__name__)
 
 _DEFAULT_PROFILE = Path.home() / ".bonsai" / "chromium_profile"
@@ -116,7 +118,7 @@ class ManagedChromium:
             argv,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **DETACH_KWARGS,
         )
         await self._wait_ready(startup_timeout)
         return self.debug_url

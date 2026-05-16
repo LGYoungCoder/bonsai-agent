@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .._proc import DETACH_KWARGS
+
 log = logging.getLogger(__name__)
 
 
@@ -49,7 +51,7 @@ def schedule_ingest(session_file: Path, *, db_path: Path,
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **DETACH_KWARGS,
         )
         return p
     except Exception as e:

@@ -8,17 +8,18 @@ Model:
 - One instance per (root, kind). PID persisted to `<root>/data/<kind>_runner.pid`.
 - Log tailed from `<root>/logs/<kind>_runner.log`.
 - start() is idempotent: if a live PID already exists, it's returned unchanged.
-- stop() sends SIGTERM then, after 3s, SIGKILL.
+- stop() sends SIGTERM then, after 3s, escalates (SIGKILL on POSIX;
+  Windows SIGTERM is already TerminateProcess, so escalation is a no-op).
 """
 from __future__ import annotations
 
 import logging
-import os
-import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+from .._proc import DETACH_KWARGS, pid_alive, terminate_pid
 
 log = logging.getLogger(__name__)
 
@@ -31,30 +32,6 @@ def _pid_file(root: Path, kind: str) -> Path:
 
 def _log_file(root: Path, kind: str) -> Path:
     return root / "logs" / f"{kind}_runner.log"
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError, OSError):
-        return False
-    # On Linux, catch zombies of children we spawned — os.kill reports them
-    # as alive but the process is effectively dead. /proc reveals State: Z.
-    try:
-        with open(f"/proc/{pid}/status", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("State:"):
-                    if "Z" in line.split(":", 1)[1]:
-                        # reap so the pid is properly freed
-                        try:
-                            os.waitpid(pid, os.WNOHANG)
-                        except OSError:
-                            pass
-                        return False
-                    break
-    except (FileNotFoundError, PermissionError, OSError):
-        pass   # non-Linux or race; os.kill result stands
-    return True
 
 
 def _read_pid(root: Path, kind: str) -> int | None:
@@ -73,7 +50,7 @@ def status(root: Path, kind: str) -> dict:
     pid = _read_pid(root, kind)
     if pid is None:
         return {"running": False}
-    if not _pid_alive(pid):
+    if not pid_alive(pid):
         # Clean up stale pid file.
         _pid_file(root, kind).unlink(missing_ok=True)
         return {"running": False, "stale_pid": pid}
@@ -104,12 +81,13 @@ def start(root: Path, kind: str, *, allow: str = "") -> dict:
     if allow:
         args += ["--allow", allow]
 
-    # start_new_session detaches from web server's process group so Ctrl+C
-    # on `bonsai serve` doesn't take the runner down.
+    # DETACH_KWARGS detaches from web server's process group so Ctrl+C on
+    # `bonsai serve` doesn't take the runner down. POSIX → start_new_session;
+    # Windows → CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS.
     proc = subprocess.Popen(
         args, stdout=log_handle, stderr=log_handle,
-        start_new_session=True,
         cwd=str(root),
+        **DETACH_KWARGS,
     )
     _pid_file(root, kind).parent.mkdir(parents=True, exist_ok=True)
     _pid_file(root, kind).write_text(str(proc.pid), encoding="utf-8")
@@ -121,22 +99,11 @@ def stop(root: Path, kind: str, *, timeout: float = 3.0) -> dict:
     if kind not in _SUPPORTED:
         raise ValueError(f"unsupported kind: {kind}")
     pid = _read_pid(root, kind)
-    if pid is None or not _pid_alive(pid):
+    if pid is None or not pid_alive(pid):
         _pid_file(root, kind).unlink(missing_ok=True)
         return {"running": False, "stopped_nothing": True}
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError as e:
-        log.warning("SIGTERM %d failed: %s", pid, e)
-    deadline = time.time() + timeout
-    while time.time() < deadline and _pid_alive(pid):
-        time.sleep(0.2)
-    if _pid_alive(pid):
-        try:
-            os.kill(pid, signal.SIGKILL)
-            log.warning("forced SIGKILL on pid %d", pid)
-        except OSError:
-            pass
+    if not terminate_pid(pid, timeout=timeout):
+        log.warning("failed to fully terminate pid %d", pid)
     _pid_file(root, kind).unlink(missing_ok=True)
     return {"running": False, "killed_pid": pid}
 
@@ -160,7 +127,7 @@ def restart_stale_runners(root: Path, *, kinds: list[str] | None = None) -> list
     """For each running runner, if its pid file is older than the newest
     bonsai source file mtime, stop+start it. Caller is `bonsai serve` startup.
 
-    Why this exists: runners use `start_new_session=True` so they survive
+    Why this exists: runners are spawned detached so they survive
     `serve` restarts. Without this sweep, `git pull` + restart serve leaves
     runners on the *previous* bytecode → confusing tracebacks where line
     numbers from old bytecode point at docstrings in current source.
