@@ -16,12 +16,46 @@ from typing import Any
 
 from ..tools.ask_user import ask_user
 from ..tools.code_run import code_run
+from ..tools.code_search import code_search
 from ..tools.file_read import file_read
 from ..tools.file_write import file_write
+from ..tools.git_ops import git_ops
 from ..tools.memory_search import memory_recall, memory_search
+from ..tools.pytest_run import pytest_run
 from ..tools.skill_lookup import skill_lookup
+from ..tools.working_memory import working_memory
 from .session import Session
 from .types import ToolCall, ToolResult
+
+# ─── Harness role gating ──────────────────────────────────────────────
+# When Handler.role is set to one of these, dispatch enforces per-role tool
+# whitelist. role=None (default) → no gating, all tools available.
+# This is soft isolation (agent self-declares role); real isolation would
+# need sub-agents. But it catches "Inspector calls file_write" mistakes
+# and surfaces them as tool errors instead of silent damage.
+_ROLE_TOOLS: dict[str, frozenset[str]] = {
+    "planner": frozenset({
+        "file_read", "file_write", "code_run", "code_search",
+        "skill_lookup", "memory_search", "memory_recall",
+        "working_memory", "ask_user", "harness_set_role",
+    }),
+    "operator": frozenset({
+        "file_read", "file_write", "code_run", "code_search",
+        "pytest_run", "git_ops", "ask_user",
+        "working_memory", "harness_set_role",
+    }),
+    "inspector": frozenset({
+        "file_read", "code_search", "code_run", "pytest_run",
+        "ask_user", "working_memory", "harness_set_role",
+        # NOTE: no file_write — Inspector must NOT modify business code.
+    }),
+    "analyst": frozenset({
+        "file_read", "file_write", "code_search",
+        "memory_search", "memory_recall", "ask_user",
+        "working_memory", "harness_set_role",
+        # file_write allowed for writing review docs / memory entries.
+    }),
+}
 
 log = logging.getLogger(__name__)
 
@@ -105,10 +139,31 @@ class Handler:
     # headless on bare servers. IM bot / scheduler override with True so
     # autonomous runs don't pop windows.
     browser_headless: bool | None = None
+    # Harness role gate. None = no enforcement. Set to one of
+    # planner/operator/inspector/analyst to restrict the tool surface.
+    role: str | None = None
     _browser_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False,
                                          repr=False, compare=False)
     _browser_init_failed: str | None = field(default=None, init=False,
                                               repr=False, compare=False)
+
+    def set_role(self, role: str | None) -> str:
+        """Switch the harness role gate. Returns a status string."""
+        if role is None or role == "" or role.lower() == "none":
+            self.role = None
+            return "[role] cleared — all tools available"
+        r = role.lower()
+        if r not in _ROLE_TOOLS:
+            return (f"[error] unknown role: {role!r} "
+                    f"(use one of: {','.join(sorted(_ROLE_TOOLS))} or 'none')")
+        self.role = r
+        allowed = sorted(_ROLE_TOOLS[r])
+        return f"[role] set to {r} — allowed tools: {','.join(allowed)}"
+
+    def _role_allows(self, tool_name: str) -> bool:
+        if self.role is None:
+            return True
+        return tool_name in _ROLE_TOOLS[self.role]
 
     async def dispatch(self, call: ToolCall) -> StepOutcome:
         t0 = time.monotonic()
@@ -131,6 +186,24 @@ class Handler:
         name = call.name
         args = call.args or {}
         log.debug("dispatch %s %s", name, args)
+
+        # Role gate — runs before dispatch. Cheap; deny early to keep
+        # error messages helpful instead of leaking tool semantics.
+        if not self._role_allows(name):
+            allowed = sorted(_ROLE_TOOLS[self.role] if self.role else [])
+            return StepOutcome(ToolResult(
+                call.id,
+                f"[role-gate] tool {name!r} not allowed for role {self.role!r}; "
+                f"allowed: {','.join(allowed)}. "
+                "Call harness_set_role(role='none') to disable gating, "
+                "or switch to a role that owns this tool.",
+                is_error=True,
+            ))
+
+        if name == "harness_set_role":
+            out = self.set_role(args.get("role"))
+            return StepOutcome(ToolResult(call.id, out))
+
         try:
             if name == "file_read":
                 out = file_read(
@@ -189,6 +262,47 @@ class Handler:
                 out = skill_lookup(keyword=args["keyword"], store=self.skill_store)
                 return StepOutcome(ToolResult(call.id, out))
 
+            if name == "code_search":
+                out = code_search(
+                    query=args["query"],
+                    path=args.get("path", "."),
+                    glob=args.get("glob"),
+                    case_insensitive=args.get("case_insensitive", False),
+                    max_results=args.get("max_results", 80),
+                    cwd=self.session.cwd,
+                )
+                return StepOutcome(ToolResult(call.id, out))
+
+            if name == "working_memory":
+                out = working_memory(
+                    action=args["action"],
+                    content=args.get("content"),
+                    artifact_dir=self.session.artifact_dir(),
+                )
+                return StepOutcome(ToolResult(call.id, out))
+
+            if name == "pytest_run":
+                out = pytest_run(
+                    scope=args.get("scope"),
+                    pattern=args.get("pattern"),
+                    extra_args=args.get("extra_args"),
+                    timeout=args.get("timeout", 300),
+                    cwd=self.session.cwd,
+                )
+                return StepOutcome(ToolResult(call.id, out))
+
+            if name == "git_ops":
+                out = git_ops(
+                    action=args["action"],
+                    message=args.get("message"),
+                    files=args.get("files"),
+                    paths=args.get("paths"),
+                    staged=args.get("staged", False),
+                    limit=args.get("limit", 10),
+                    cwd=self.session.cwd,
+                )
+                return StepOutcome(ToolResult(call.id, out))
+
             if name in ("web_scan", "web_execute_js", "web_click", "web_type",
                         "web_scroll", "web_navigate"):
                 if self.browser is None:
@@ -242,10 +356,17 @@ class Handler:
                 self._browser_init_failed = f"{type(e).__name__}: {e}"
                 log.warning("lazy browser init failed: %s", self._browser_init_failed)
 
-    async def dispatch_batch(self, calls: list[ToolCall]) -> list[StepOutcome]:
+    async def dispatch_batch(
+        self,
+        calls: list[ToolCall],
+        on_result: Callable[[StepOutcome], None] | None = None,
+    ) -> list[StepOutcome]:
         """Run tool calls in parallel unless they conflict.
 
         Conflicting groups are serialized; independent calls run concurrently.
+        `on_result` (if provided) fires synchronously after each individual
+        tool dispatch — used by the loop to persist partial results for
+        crash recovery.
         """
         if not calls:
             return []
@@ -280,7 +401,13 @@ class Handler:
 
         async def run_serial(idxs: list[int]) -> None:
             for i in idxs:
-                results[i] = await self.dispatch(calls[i])
+                outcome = await self.dispatch(calls[i])
+                results[i] = outcome
+                if on_result is not None:
+                    try:
+                        on_result(outcome)
+                    except Exception:
+                        log.exception("on_result callback failed")
 
         await asyncio.gather(*(run_serial(idxs) for idxs in buckets.values()))
         return [r for r in results if r is not None]

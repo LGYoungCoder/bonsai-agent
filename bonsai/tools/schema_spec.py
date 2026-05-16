@@ -18,7 +18,12 @@ SPRINT1_TOOLS = {"file_read", "file_write", "code_run", "memory_search", "ask_us
 SPRINT2_TOOLS = SPRINT1_TOOLS | {"skill_lookup"}
 BROWSER_TOOLS = {"web_scan", "web_execute_js", "web_click", "web_type",
                  "web_scroll", "web_navigate"}
-ALL_TOOLS = SPRINT2_TOOLS | BROWSER_TOOLS
+# Harness-grade tools — high-frequency code-mission ops where token-cost
+# of going through code_run/bash actually hurts. Per-role gating lives in
+# core/handler.py role_allowed_tools.
+HARNESS_TOOLS = {"code_search", "working_memory", "pytest_run", "git_ops",
+                 "harness_set_role"}
+ALL_TOOLS = SPRINT2_TOOLS | BROWSER_TOOLS | HARNESS_TOOLS
 # memory_recall is added at runtime too; not in schema.json, so we inline it.
 MEMORY_RECALL_SPEC = ToolSpec(
     name="memory_recall",

@@ -152,5 +152,73 @@
       },
       "required": ["url"]
     }
+  },
+  {
+    "name": "code_search",
+    "description": "结构化代码搜索。优先 ripgrep,降级 grep -rn。比 code_run grep 更结构化,自动截断。大代码库探索 / 找 symbol / 查 caller 用这个。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "query": {"type": "string", "description": "搜索词(可正则)"},
+        "path": {"type": "string", "description": "搜索目录,默认当前", "default": "."},
+        "glob": {"type": "string", "description": "[可选] 文件通配,如 '*.py' 或 '*.{ts,tsx}'"},
+        "case_insensitive": {"type": "boolean", "default": false},
+        "max_results": {"type": "integer", "description": "最多返回条数", "default": 80}
+      },
+      "required": ["query"]
+    }
+  },
+  {
+    "name": "working_memory",
+    "description": "本轮 session 的工作便签 (artifact_dir/working_memory.md)。长 task 跑久了上下文会被压,把'记住的关键事实'写这里;新 turn / 跨 task 通过 get 读回来。action: set 覆盖 / append 追加 / get 读 / clear 清。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "action": {"type": "string", "enum": ["set", "append", "get", "clear", "replace"]},
+        "content": {"type": "string", "description": "set/append/replace 必填"}
+      },
+      "required": ["action"]
+    }
+  },
+  {
+    "name": "pytest_run",
+    "description": "结构化跑 pytest,返回 passed/failed/skipped 计数 + 最多 5 个失败的 traceback 末尾 800 字。比 code_run pytest 省 token + LLM 好读。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "scope": {"type": "string", "description": "[可选] 跑的目标 (e.g. tests/test_foo.py 或 tests/)"},
+        "pattern": {"type": "string", "description": "[可选] -k 模式过滤"},
+        "extra_args": {"type": "array", "items": {"type": "string"}, "description": "[可选] 透传给 pytest 的额外参数"},
+        "timeout": {"type": "integer", "default": 300}
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "git_ops",
+    "description": "结构化 git 操作。比 code_run git 安全(无 shell 注入)+ 自动截断 diff。action: status / diff / commit / log / branch。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "action": {"type": "string", "enum": ["status", "diff", "commit", "log", "branch"]},
+        "message": {"type": "string", "description": "commit 必填"},
+        "files": {"type": "array", "items": {"type": "string"}, "description": "commit 时要 add 的文件列表 (不填则用已 stage 的)"},
+        "paths": {"type": "array", "items": {"type": "string"}, "description": "diff 时限定路径"},
+        "staged": {"type": "boolean", "description": "diff 时看 staged 区,默认看 working tree", "default": false},
+        "limit": {"type": "integer", "description": "log 条数", "default": 10}
+      },
+      "required": ["action"]
+    }
+  },
+  {
+    "name": "harness_set_role",
+    "description": "harness 4 角色门控。进入 harness 模式后,每次按 drive action 切角色:inspect_pre/inspect_audit→inspector,negotiate/execute→operator,plan/create_tasks→planner,review→analyst。'none' 清空门控。非 harness 任务不调用。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "role": {"type": "string", "enum": ["planner", "operator", "inspector", "analyst", "none"], "description": "切到的角色;none = 关闭门控"}
+      },
+      "required": ["role"]
+    }
   }
 ]

@@ -196,7 +196,24 @@ class AgentLoop:
                 yield StreamEvent(kind="done", data={"reason": "no_tool_calls", "turns": turn + 1})
                 return
 
-            outcomes = await self.handler.dispatch_batch(list(tool_calls))
+            # Crash recovery: persist each tool result as it lands so a
+            # process death between dispatch start and final batch write
+            # doesn't lose completed tool work. record_partial_tool_result is
+            # idempotent on resume — the final batch supersedes it.
+            current_turn = turn + 1
+
+            def _persist_partial(outcome) -> None:
+                if self.session_log:
+                    try:
+                        self.session_log.record_partial_tool_result(
+                            outcome.tool_result, turn=current_turn,
+                        )
+                    except Exception:
+                        log.exception("partial tool result persist failed")
+
+            outcomes = await self.handler.dispatch_batch(
+                list(tool_calls), on_result=_persist_partial,
+            )
 
             # Append tool results as a single 'tool' message.
             tool_msg = Message(

@@ -385,7 +385,20 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 5px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
+  /* Mission plan markdown + DAG */
+  .mission-md { font-size: 13px; line-height: 1.6; }
+  .mission-md h1 { font-size: 18px; margin: 12px 0 8px; }
+  .mission-md h2 { font-size: 15px; margin: 10px 0 6px; }
+  .mission-md h3 { font-size: 14px; margin: 8px 0 4px; }
+  .mission-md code { background: var(--bg-soft); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+  .mission-md pre { background: var(--bg-soft); padding: 10px; border-radius: 6px; overflow-x: auto; }
+  .mission-md ul, .mission-md ol { padding-left: 22px; margin: 4px 0; }
+  .mission-md p { margin: 4px 0; }
+  .mission-dag svg { max-width: 100%; height: auto; }
 </style>
+<!-- markdown + mermaid for mission_plan / DAG rendering. Loaded lazily. -->
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.0/dist/mermaid.min.js" defer></script>
 </head>
 
 <body>
@@ -413,6 +426,7 @@
     <button class="rail-btn" data-view="schedule"><span>⏰</span><span class="tip">定时任务</span></button>
     <button class="rail-btn" data-view="autonomous"><span>⚡</span><span class="tip">自主任务</span></button>
     <button class="rail-btn" data-view="stats"><span>📊</span><span class="tip">数据中心</span></button>
+    <button class="rail-btn" data-view="missions"><span>🌳</span><span class="tip">流水线</span></button>
     <button class="rail-btn" id="theme-toggle" style="margin-top:auto;" title="切换主题"><span id="theme-icon">🌙</span><span class="tip" id="theme-tip">切换主题</span></button>
     <div class="rail-foot mono">v0.1</div>
   </aside>
@@ -707,6 +721,37 @@
     </div>
   </section>
 
+  <!-- ═══════ Missions view (harness-cli 流水线) ═══════ -->
+  <section class="view hidden" id="view-missions">
+    <aside class="secondary">
+      <div class="secondary-head">
+        <span class="secondary-title">活跃 mission</span>
+        <button class="btn btn-sm" id="btn-refresh-missions" title="刷新">↻</button>
+      </div>
+      <div class="secondary-body" id="missions-list">
+        <div class="conv-empty">加载中…</div>
+      </div>
+      <div class="secondary-foot mono" id="missions-hint">5s polling · harness-cli</div>
+    </aside>
+    <div class="main">
+      <div class="main-top">
+        <span class="main-title" id="missions-title">流水线</span>
+        <span class="badge badge-idle" id="missions-status">—</span>
+      </div>
+      <div class="main-inner narrow">
+        <div class="wrap" id="missions-body">
+          <div class="page-header">
+            <h1 class="page-title">harness-cli 流水线</h1>
+            <p class="page-desc">复杂多步骤 code 任务走 <code class="mono">harness-cli</code> 状态机驱动 4 角色流水线(Planner / Operator / Inspector / Analyst)。左侧选一个 mission 看进度;agent 通过 SOP <code class="mono">harness_workflow</code> 自动启动。</p>
+          </div>
+          <div class="card" style="text-align:center; color:var(--mist);">
+            左侧选一个 mission 查看,或让 agent 启动一个复杂任务。
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
 </div>
 
 <script>
@@ -764,6 +809,8 @@ function switchView(name) {
   if (name === 'schedule') loadSchedules();
   if (name === 'autonomous') loadAutonomous();
   if (name === 'stats') loadStats();
+  if (name === 'missions') startMissionsPolling();
+  else stopMissionsPolling();
   if (name === 'chat') {
     if (!state.wsConnected) connectWS();
     loadConversations();
@@ -3667,6 +3714,254 @@ connectWS();
 // view-chat is the default visible view — switchView('chat') isn't called,
 // so populate the sidebar list explicitly on first load.
 loadConversations();
+
+// ═══════════════════════════════════════════════════════════════════
+// Missions view (harness-cli pipelines)
+// ═══════════════════════════════════════════════════════════════════
+
+let _missionsTimer = null;
+let _missionsSelected = null;
+let _missionsSSE = null;
+let _missionsLastSig = null;
+
+function startMissionsPolling() {
+  if (_missionsSSE || _missionsTimer) return;
+  loadMissions();
+  // Prefer SSE; fall back to polling if it errors or isn't supported.
+  if (typeof EventSource !== 'undefined') {
+    try {
+      const es = new EventSource('/api/missions/stream');
+      es.addEventListener('snapshot', (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          _renderMissionsList(data);
+          // task progress change → toast
+          maybeToastProgress(data);
+        } catch {}
+      });
+      es.onerror = () => {
+        try { es.close(); } catch {}
+        _missionsSSE = null;
+        if (!_missionsTimer) _missionsTimer = setInterval(loadMissions, 5000);
+      };
+      _missionsSSE = es;
+      return;
+    } catch (e) {
+      console.warn('EventSource failed, falling back to polling', e);
+    }
+  }
+  _missionsTimer = setInterval(loadMissions, 5000);
+}
+function stopMissionsPolling() {
+  if (_missionsTimer) { clearInterval(_missionsTimer); _missionsTimer = null; }
+  if (_missionsSSE) { try { _missionsSSE.close(); } catch {} _missionsSSE = null; }
+}
+
+function _renderMissionsList(data) {
+  const list = $('#missions-list');
+  const hint = $('#missions-hint');
+  if (!list) return;
+  if (!data.ok) {
+    list.innerHTML = `<div class="conv-empty">${data.error || '加载失败'}</div>`;
+    if (hint) hint.textContent = data.missions_root ? `根目录: ${data.missions_root}` : 'harness-cli not on PATH';
+    return;
+  }
+  const items = data.missions || [];
+  if (hint) hint.textContent = `${items.length} 个 · live · ${data.missions_root || ''}`;
+  if (items.length === 0) {
+    list.innerHTML = '<div class="conv-empty">暂无活跃 mission</div>';
+    return;
+  }
+  list.innerHTML = items.map(m => {
+    const pct = m.progress.total > 0 ? Math.round(100 * m.progress.done / m.progress.total) : 0;
+    const active = _missionsSelected === m.id ? ' active' : '';
+    return `
+      <div class="conv-item${active}" data-mission="${m.id}">
+        <div style="display:flex; justify-content:space-between; gap:8px; align-items:center;">
+          <span style="font-weight:500;">${m.id}</span>
+          ${_missionStatusBadge(m.status)}
+        </div>
+        <div class="mono" style="font-size:11px; color:var(--mist); margin-top:3px;">
+          ${m.progress.done}/${m.progress.total} (${pct}%)
+        </div>
+      </div>`;
+  }).join('');
+  if (_missionsSelected) renderMissionDetail(_missionsSelected);
+}
+
+function _toastShow(text) {
+  let toast = document.getElementById('mission-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'mission-toast';
+    toast.style.cssText = 'position:fixed; right:20px; bottom:20px; background:var(--accent,#7A9268); color:white; padding:10px 16px; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.2); z-index:10000; font-size:13px; max-width:320px; opacity:0; transition:opacity 0.3s;';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = text;
+  toast.style.opacity = '1';
+  clearTimeout(toast._hideTimer);
+  toast._hideTimer = setTimeout(() => { toast.style.opacity = '0'; }, 4500);
+}
+
+const _lastMissionState = {};
+function maybeToastProgress(data) {
+  for (const m of (data.missions || [])) {
+    const prev = _lastMissionState[m.id];
+    const cur = `${m.status}:${m.progress.done}/${m.progress.total}`;
+    _lastMissionState[m.id] = cur;
+    if (prev && prev !== cur) {
+      // progress moved
+      if (prev.split(':')[1] !== cur.split(':')[1]) {
+        _toastShow(`🌳 ${m.id}  ${m.progress.done}/${m.progress.total} · ${m.status}`);
+      } else if (prev.split(':')[0] !== m.status) {
+        _toastShow(`🌳 ${m.id} → ${m.status}`);
+      }
+    }
+  }
+}
+
+function _missionStatusBadge(s) {
+  const cls = {
+    INIT: 'badge-idle', PLANNING: 'badge-idle', APPROVED: 'badge-idle',
+    EXECUTING: 'badge-running', REVIEWING: 'badge-running',
+    REVIEWED: 'badge-idle', ARCHIVED: 'badge-idle', BLOCKED: 'badge-error',
+  }[s] || 'badge-idle';
+  return `<span class="badge ${cls}">${s}</span>`;
+}
+
+async function loadMissions() {
+  try {
+    const res = await fetch('/api/missions');
+    const data = await res.json();
+    _renderMissionsList(data);
+    maybeToastProgress(data);
+  } catch (e) {
+    const list = $('#missions-list');
+    if (list) list.innerHTML = `<div class="conv-empty">网络错误: ${e}</div>`;
+  }
+}
+
+async function renderMissionDetail(missionId) {
+  _missionsSelected = missionId;
+  const body = $('#missions-body');
+  const title = $('#missions-title');
+  if (title) title.textContent = missionId;
+  try {
+    const res = await fetch(`/api/missions/${encodeURIComponent(missionId)}`);
+    const data = await res.json();
+    if (!data.ok) {
+      body.innerHTML = `<div class="card" style="color:var(--mist);">加载失败: ${data.error || '未知'}</div>`;
+      return;
+    }
+    const m = data.mission || {};
+    const tasks = data.tasks || [];
+    const plan = data.plan || '';
+    const statusBadge = _missionStatusBadge(m.status);
+    $('#missions-status').className = '';
+    $('#missions-status').outerHTML = statusBadge.replace('badge', 'badge" id="missions-status');
+    const tasksHtml = tasks.map(t => {
+      const stCls = {
+        DONE: 'badge-idle', READY: 'badge-idle', NEGOTIATING: 'badge-running',
+        IN_PROGRESS: 'badge-running', VERIFYING: 'badge-running',
+        FAILED: 'badge-error', DLQ: 'badge-error',
+      }[t.status] || 'badge-idle';
+      const verdict = t.verdict ? ` · verdict=${t.verdict}` : '';
+      const retries = t.retries ? ` · retries=${t.retries}` : '';
+      const deps = (t.deps && t.deps.length) ? ` · deps: ${t.deps.join(',')}` : '';
+      return `
+        <div class="card" style="margin-bottom:8px;">
+          <div style="display:flex; justify-content:space-between; gap:8px;">
+            <strong>${t.id}</strong>
+            <span class="badge ${stCls}">${t.status}</span>
+          </div>
+          <div style="margin-top:4px;">${t.title || ''}</div>
+          <div class="mono" style="font-size:11px; color:var(--mist); margin-top:3px;">${t.status}${verdict}${retries}${deps}</div>
+        </div>`;
+    }).join('');
+    const dagHtml = tasks.length > 0 ? _renderDag(tasks) : '';
+    const planHtml = plan
+      ? `<details open style="margin-top:12px;"><summary style="cursor:pointer;">mission_plan.md (${plan.length} chars)</summary>
+           <div class="mission-md" id="mission-plan-md"></div>
+         </details>`
+      : '';
+    body.innerHTML = `
+      <div class="page-header">
+        <h1 class="page-title">${m.id || missionId}</h1>
+        <p class="page-desc mono">${m.status || '—'} · ${tasks.filter(t=>t.status==='DONE').length}/${tasks.length}</p>
+      </div>
+      ${dagHtml}
+      ${tasksHtml || '<div class="card" style="color:var(--mist);">还没有 task</div>'}
+      ${planHtml}
+    `;
+    // Render markdown if marked.js loaded
+    if (plan) {
+      const planEl = document.getElementById('mission-plan-md');
+      if (planEl && typeof marked !== 'undefined') {
+        planEl.innerHTML = marked.parse(plan);
+      } else if (planEl) {
+        planEl.innerHTML = `<pre class="mono" style="white-space:pre-wrap; font-size:12px;">${plan.replace(/[<&]/g, c => ({'<':'&lt;','&':'&amp;'}[c]))}</pre>`;
+      }
+    }
+    // Render mermaid diagram lazily
+    _renderMermaidIfReady();
+  } catch (e) {
+    body.innerHTML = `<div class="card" style="color:var(--mist);">网络错误: ${e}</div>`;
+  }
+}
+
+function _renderDag(tasks) {
+  const statusColor = {
+    DONE: '#7A9268', READY: '#888', NEGOTIATING: '#D4A574',
+    IN_PROGRESS: '#5A8FCF', VERIFYING: '#5A8FCF', FAILED: '#C66',
+    DLQ: '#A33',
+  };
+  const lines = ['graph LR'];
+  for (const t of tasks) {
+    const safeTitle = (t.title || t.id).replace(/[\[\]"]/g, '').slice(0, 30);
+    lines.push(`  ${t.id}["${t.id}<br/>${safeTitle}"]`);
+    lines.push(`  style ${t.id} fill:${statusColor[t.status] || '#888'},color:#fff,stroke:#333`);
+  }
+  for (const t of tasks) {
+    for (const dep of (t.deps || [])) {
+      lines.push(`  ${dep} --> ${t.id}`);
+    }
+  }
+  const src = lines.join('\n');
+  // unique id so re-render doesn't collide
+  const id = 'dag_' + Math.random().toString(36).slice(2, 8);
+  return `<details open style="margin-bottom:12px;">
+    <summary style="cursor:pointer; user-select:none;">📊 任务 DAG</summary>
+    <div class="mission-dag" id="${id}"><pre class="mermaid">${src}</pre></div>
+  </details>`;
+}
+
+let _mermaidInited = false;
+function _renderMermaidIfReady() {
+  if (typeof mermaid === 'undefined') {
+    // try later after defer scripts settle
+    setTimeout(_renderMermaidIfReady, 200);
+    return;
+  }
+  if (!_mermaidInited) {
+    try {
+      const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+      mermaid.initialize({ startOnLoad: false, theme: isDark ? 'dark' : 'default', securityLevel: 'loose' });
+      _mermaidInited = true;
+    } catch (e) { console.warn('mermaid init failed', e); }
+  }
+  try {
+    mermaid.run({ querySelector: '.mission-dag pre.mermaid' });
+  } catch (e) { console.warn('mermaid run failed', e); }
+}
+
+document.addEventListener('click', (e) => {
+  const item = e.target.closest('#missions-list .conv-item[data-mission]');
+  if (item) {
+    $$('#missions-list .conv-item').forEach(x => x.classList.toggle('active', x === item));
+    renderMissionDetail(item.dataset.mission);
+  }
+  if (e.target.id === 'btn-refresh-missions') loadMissions();
+});
 </script>
 </body>
 </html>

@@ -73,8 +73,11 @@ def _walk_and_resolve(obj: Any) -> Any:
 @dataclass
 class AgentConfig:
     max_turns: int = 40
-    budget_hard: int = 60_000
-    budget_soft: int = 40_000
+    # Default budgets sized for harness-grade missions (long tasks reading
+    # many files). Modern long-context models (Claude 4.x at 1M) easily
+    # accommodate this. Lower per-user via config.toml if cost-sensitive.
+    budget_hard: int = 200_000
+    budget_soft: int = 150_000
     working_dir: str = "."
 
 

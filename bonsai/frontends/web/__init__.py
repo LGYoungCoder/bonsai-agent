@@ -26,6 +26,7 @@ from . import (
     routes_config,
     routes_doctor,
     routes_memory,
+    routes_missions,
     routes_root,
     routes_scheduler,
     routes_sessions,
@@ -89,6 +90,7 @@ def make_app(root: Path, chat_factory) -> FastAPI:
     app.include_router(routes_stats.make_router(root))
     app.include_router(routes_autonomous.make_router(root))
     app.include_router(routes_scheduler.make_router(root))
+    app.include_router(routes_missions.make_router(root))
 
     return app
 
